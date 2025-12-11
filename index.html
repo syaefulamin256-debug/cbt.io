@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CBT Professional System</title>
+  <link rel="icon" type="image/png" href="https://i.imgur.com/UVQedhI.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -838,7 +839,7 @@
       }
     }
 
-    // Get random questions for exam by subject with type and difficulty distribution
+    // Get random questions for exam by subject with type distribution only
     async function getRandomQuestionsBySubject(exam) {
       if (!isSupabaseConfigured) return [];
       try {
@@ -852,8 +853,26 @@
         
         const allQuestions = data || [];
         
-        // If exam has combined type and difficulty distribution (new format)
-        if (exam.pg_easy_count !== undefined) {
+        // New format - type distribution only (no difficulty)
+        if (exam.pg_count !== undefined && exam.pgk_count !== undefined) {
+          // Filter by type only
+          const pgQuestions = allQuestions.filter(q => q.type === 'pg');
+          const pgkQuestions = allQuestions.filter(q => q.type === 'pgk');
+          
+          // Shuffle each pool
+          const shuffledPg = pgQuestions.sort(() => Math.random() - 0.5);
+          const shuffledPgk = pgkQuestions.sort(() => Math.random() - 0.5);
+          
+          // Take required count from each type
+          const selectedPg = shuffledPg.slice(0, exam.pg_count);
+          const selectedPgk = shuffledPgk.slice(0, exam.pgk_count);
+          
+          // Combine and shuffle final list
+          const combined = [...selectedPg, ...selectedPgk];
+          return combined.sort(() => Math.random() - 0.5);
+        }
+        // Old format with difficulty - still supported for backward compatibility
+        else if (exam.pg_easy_count !== undefined) {
           // Filter by type and difficulty combinations
           const pgEasyQuestions = allQuestions.filter(q => q.type === 'pg' && q.difficulty === 'easy');
           const pgMediumQuestions = allQuestions.filter(q => q.type === 'pg' && q.difficulty === 'medium');
@@ -889,7 +908,7 @@
           ];
           return combined.sort(() => Math.random() - 0.5);
         }
-        // If exam has difficulty distribution only (old format)
+        // Very old format - difficulty distribution only
         else if (exam.easy_count !== undefined && exam.medium_count !== undefined && exam.hard_count !== undefined) {
           const easyQuestions = allQuestions.filter(q => q.difficulty === 'easy');
           const mediumQuestions = allQuestions.filter(q => q.difficulty === 'medium');
@@ -906,7 +925,7 @@
           const combined = [...selectedEasy, ...selectedMedium, ...selectedHard];
           return combined.sort(() => Math.random() - 0.5);
         } else {
-          // Very old format - random selection without any distribution
+          // Fallback - random selection without any distribution
           const shuffled = allQuestions.sort(() => Math.random() - 0.5);
           return shuffled.slice(0, Math.min(exam.total_questions, shuffled.length));
         }
@@ -1697,9 +1716,6 @@
       const examSubject = document.getElementById('examSubject').value;
       const pgPercent = parseInt(document.getElementById('pgPercent').value) || 0;
       const pgkPercent = parseInt(document.getElementById('pgkPercent').value) || 0;
-      const easyPercent = parseInt(document.getElementById('easyPercent').value) || 0;
-      const mediumPercent = parseInt(document.getElementById('mediumPercent').value) || 0;
-      const hardPercent = parseInt(document.getElementById('hardPercent').value) || 0;
       
       if (!examTitle || examDuration <= 0 || totalQuestions <= 0 || !examSubject) {
         showToast('Semua field wajib diisi dengan benar!', 'error');
@@ -1713,13 +1729,6 @@
         return;
       }
 
-      // Validasi total persentase kesulitan harus 100%
-      const totalDifficultyPercent = easyPercent + mediumPercent + hardPercent;
-      if (totalDifficultyPercent !== 100) {
-        showToast(`Total bobot tingkat kesulitan harus 100%! Saat ini: ${totalDifficultyPercent}%`, 'error');
-        return;
-      }
-
       showLoading();
       const availableQuestions = await getQuestions(examSubject);
       
@@ -1727,58 +1736,19 @@
       const pgCount = Math.round((pgPercent / 100) * totalQuestions);
       const pgkCount = totalQuestions - pgCount; // Sisa untuk PGK
       
-      // Hitung jumlah soal per tingkat kesulitan
-      const easyCount = Math.round((easyPercent / 100) * totalQuestions);
-      const mediumCount = Math.round((mediumPercent / 100) * totalQuestions);
-      const hardCount = totalQuestions - easyCount - mediumCount; // Sisa untuk hard
+      // Filter soal berdasarkan tipe
+      const pgQuestions = availableQuestions.filter(q => q.type === 'pg');
+      const pgkQuestions = availableQuestions.filter(q => q.type === 'pgk');
 
-      // Hitung kombinasi: PG-Easy, PG-Medium, PG-Hard, PGK-Easy, PGK-Medium, PGK-Hard
-      const pgEasyCount = Math.round((pgPercent / 100) * easyCount);
-      const pgMediumCount = Math.round((pgPercent / 100) * mediumCount);
-      const pgHardCount = Math.round((pgPercent / 100) * hardCount);
-      
-      const pgkEasyCount = easyCount - pgEasyCount;
-      const pgkMediumCount = mediumCount - pgMediumCount;
-      const pgkHardCount = hardCount - pgHardCount;
-
-      // Filter soal berdasarkan kombinasi tipe dan kesulitan
-      const pgEasyQuestions = availableQuestions.filter(q => q.type === 'pg' && q.difficulty === 'easy');
-      const pgMediumQuestions = availableQuestions.filter(q => q.type === 'pg' && q.difficulty === 'medium');
-      const pgHardQuestions = availableQuestions.filter(q => q.type === 'pg' && q.difficulty === 'hard');
-      
-      const pgkEasyQuestions = availableQuestions.filter(q => q.type === 'pgk' && q.difficulty === 'easy');
-      const pgkMediumQuestions = availableQuestions.filter(q => q.type === 'pgk' && q.difficulty === 'medium');
-      const pgkHardQuestions = availableQuestions.filter(q => q.type === 'pgk' && q.difficulty === 'hard');
-
-      // Validasi ketersediaan soal untuk setiap kombinasi
-      if (pgEasyQuestions.length < pgEasyCount) {
+      // Validasi ketersediaan soal per tipe
+      if (pgQuestions.length < pgCount) {
         hideLoading();
-        showToast(`Soal PG-Mudah tidak cukup! Tersedia ${pgEasyQuestions.length}, dibutuhkan ${pgEasyCount}`, 'error');
+        showToast(`Soal PG tidak cukup! Tersedia ${pgQuestions.length}, dibutuhkan ${pgCount}`, 'error');
         return;
       }
-      if (pgMediumQuestions.length < pgMediumCount) {
+      if (pgkQuestions.length < pgkCount) {
         hideLoading();
-        showToast(`Soal PG-Sedang tidak cukup! Tersedia ${pgMediumQuestions.length}, dibutuhkan ${pgMediumCount}`, 'error');
-        return;
-      }
-      if (pgHardQuestions.length < pgHardCount) {
-        hideLoading();
-        showToast(`Soal PG-Sulit tidak cukup! Tersedia ${pgHardQuestions.length}, dibutuhkan ${pgHardCount}`, 'error');
-        return;
-      }
-      if (pgkEasyQuestions.length < pgkEasyCount) {
-        hideLoading();
-        showToast(`Soal PGK-Mudah tidak cukup! Tersedia ${pgkEasyQuestions.length}, dibutuhkan ${pgkEasyCount}`, 'error');
-        return;
-      }
-      if (pgkMediumQuestions.length < pgkMediumCount) {
-        hideLoading();
-        showToast(`Soal PGK-Sedang tidak cukup! Tersedia ${pgkMediumQuestions.length}, dibutuhkan ${pgkMediumCount}`, 'error');
-        return;
-      }
-      if (pgkHardQuestions.length < pgkHardCount) {
-        hideLoading();
-        showToast(`Soal PGK-Sulit tidak cukup! Tersedia ${pgkHardQuestions.length}, dibutuhkan ${pgkHardCount}`, 'error');
+        showToast(`Soal PGK tidak cukup! Tersedia ${pgkQuestions.length}, dibutuhkan ${pgkCount}`, 'error');
         return;
       }
 
@@ -1792,20 +1762,8 @@
         subject: examSubject,
         pg_percent: pgPercent,
         pgk_percent: pgkPercent,
-        easy_percent: easyPercent,
-        medium_percent: mediumPercent,
-        hard_percent: hardPercent,
         pg_count: pgCount,
-        pgk_count: pgkCount,
-        easy_count: easyCount,
-        medium_count: mediumCount,
-        hard_count: hardCount,
-        pg_easy_count: pgEasyCount,
-        pg_medium_count: pgMediumCount,
-        pg_hard_count: pgHardCount,
-        pgk_easy_count: pgkEasyCount,
-        pgk_medium_count: pgkMediumCount,
-        pgk_hard_count: pgkHardCount
+        pgk_count: pgkCount
       });
       hideLoading();
 
@@ -1816,11 +1774,7 @@
         document.getElementById('totalQuestions').value = 50;
         document.getElementById('pgPercent').value = 70;
         document.getElementById('pgkPercent').value = 30;
-        document.getElementById('easyPercent').value = 40;
-        document.getElementById('mediumPercent').value = 40;
-        document.getElementById('hardPercent').value = 20;
         updateTotalTypePercent();
-        updateTotalDifficultyPercent();
         renderExamManagement();
       }
     }
@@ -1831,19 +1785,6 @@
       const total = pgPercent + pgkPercent;
       
       const totalDisplay = document.getElementById('totalTypePercentDisplay');
-      if (totalDisplay) {
-        totalDisplay.textContent = `${total}%`;
-        totalDisplay.className = total === 100 ? 'text-2xl font-bold text-green-600' : 'text-2xl font-bold text-red-600';
-      }
-    }
-
-    function updateTotalDifficultyPercent() {
-      const easyPercent = parseInt(document.getElementById('easyPercent').value) || 0;
-      const mediumPercent = parseInt(document.getElementById('mediumPercent').value) || 0;
-      const hardPercent = parseInt(document.getElementById('hardPercent').value) || 0;
-      const total = easyPercent + mediumPercent + hardPercent;
-      
-      const totalDisplay = document.getElementById('totalDifficultyPercentDisplay');
       if (totalDisplay) {
         totalDisplay.textContent = `${total}%`;
         totalDisplay.className = total === 100 ? 'text-2xl font-bold text-green-600' : 'text-2xl font-bold text-red-600';
@@ -2358,7 +2299,7 @@
                 Login
               </button>
             </form>
-            </div>
+          </div>
         </div>
       `;
     }
@@ -3050,45 +2991,6 @@
                   </div>
                 </div>
 
-                <div class="border-2 border-orange-200 rounded-lg p-6 bg-orange-50">
-                  <div class="flex justify-between items-center mb-4">
-                    <h4 class="text-lg font-bold text-gray-900">⚖️ Bobot Tingkat Kesulitan (Persentase)</h4>
-                    <div class="text-center">
-                      <p class="text-xs text-gray-600 mb-1">Total Bobot Kesulitan</p>
-                      <p id="totalDifficultyPercentDisplay" class="text-2xl font-bold text-gray-600">100%</p>
-                    </div>
-                  </div>
-
-                  <div class="grid grid-cols-3 gap-4">
-                    <div>
-                      <label for="easyPercent" class="block text-sm font-medium text-gray-700 mb-2">Mudah (%)</label>
-                      <input type="number" id="easyPercent" required min="0" max="100" value="40" 
-                             oninput="updateTotalDifficultyPercent()"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-                    </div>
-
-                    <div>
-                      <label for="mediumPercent" class="block text-sm font-medium text-gray-700 mb-2">Sedang (%)</label>
-                      <input type="number" id="mediumPercent" required min="0" max="100" value="40"
-                             oninput="updateTotalDifficultyPercent()"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-yellow-500">
-                    </div>
-
-                    <div>
-                      <label for="hardPercent" class="block text-sm font-medium text-gray-700 mb-2">Sulit (%)</label>
-                      <input type="number" id="hardPercent" required min="0" max="100" value="20"
-                             oninput="updateTotalDifficultyPercent()"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-red-500">
-                    </div>
-                  </div>
-
-                  <div class="mt-3 p-3 bg-blue-50 rounded-lg">
-                    <p class="text-xs text-blue-800">
-                      <strong>💡 Catatan:</strong> Total bobot kesulitan harus 100%. Sistem akan menghitung jumlah soal untuk setiap tingkat kesulitan.
-                    </p>
-                  </div>
-                </div>
-
                 <button type="submit" class="w-full px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold hover:bg-orange-700 transition">
                   🎲 Generate Token Ujian
                 </button>
@@ -3129,10 +3031,10 @@
                           <p class="font-semibold text-gray-900">${exam.total_questions} soal</p>
                         </div>
                       </div>
-                      ${exam.pg_percent ? `
+                      ${exam.pg_percent !== undefined ? `
                         <div class="border-t pt-4">
-                          <p class="text-xs font-semibold text-gray-700 mb-2">📝 Bobot Tipe Soal:</p>
-                          <div class="flex gap-2 mb-3">
+                          <p class="text-xs font-semibold text-gray-700 mb-2">📝 Distribusi Tipe Soal:</p>
+                          <div class="flex gap-2">
                             <span class="px-2 py-1 rounded text-xs bg-blue-100 text-blue-800 font-semibold">
                               PG: ${exam.pg_percent}% (${exam.pg_count} soal)
                             </span>
@@ -3140,22 +3042,10 @@
                               PGK: ${exam.pgk_percent}% (${exam.pgk_count} soal)
                             </span>
                           </div>
-                          <p class="text-xs font-semibold text-gray-700 mb-2">⚖️ Bobot Kesulitan:</p>
-                          <div class="flex gap-2">
-                            <span class="px-2 py-1 rounded text-xs bg-green-100 text-green-800 font-semibold">
-                              Mudah: ${exam.easy_percent}% (${exam.easy_count} soal)
-                            </span>
-                            <span class="px-2 py-1 rounded text-xs bg-yellow-100 text-yellow-800 font-semibold">
-                              Sedang: ${exam.medium_percent}% (${exam.medium_count} soal)
-                            </span>
-                            <span class="px-2 py-1 rounded text-xs bg-red-100 text-red-800 font-semibold">
-                              Sulit: ${exam.hard_percent}% (${exam.hard_count} soal)
-                            </span>
-                          </div>
                         </div>
-                      ` : exam.easy_percent ? `
+                      ` : exam.easy_percent !== undefined ? `
                         <div class="border-t pt-4">
-                          <p class="text-xs font-semibold text-gray-700 mb-2">⚖️ Bobot Kesulitan:</p>
+                          <p class="text-xs font-semibold text-gray-700 mb-2">⚖️ Bobot Kesulitan (Format Lama):</p>
                           <div class="flex gap-2">
                             <span class="px-2 py-1 rounded text-xs bg-green-100 text-green-800 font-semibold">
                               Mudah: ${exam.easy_percent}% (${exam.easy_count} soal)
@@ -3429,5 +3319,5 @@
       renderRoleSelection();
     };
   </script>
- <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9ac0ceed244203d4',t:'MTc2NTQxMjM0NC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9ac0f214373ee78d',t:'MTc2NTQxMzc4NC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
