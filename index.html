@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CBT Professional System</title>
-  <link rel="icon" type="image/png" href="https://i.imgur.com/UVQedhI.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -203,6 +202,26 @@
       font-size: 11px;
       font-weight: 600;
     }
+
+    .warning-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(239, 68, 68, 0.95);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: shake 0.5s;
+    }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      10%, 30%, 50%, 70%, 90% { transform: translateX(-10px); }
+      20%, 40%, 60%, 80% { transform: translateX(10px); }
+    }
   </style>
   <style>@view-transition { navigation: auto; }</style>
   <script src="/_sdk/data_sdk.js" type="text/javascript"></script>
@@ -211,6 +230,13 @@
  <body class="h-full">
   <div id="app" class="h-full w-full overflow-auto"></div>
   <script>
+    // ==================== FEATURES CONFIGURATION ====================
+    // This CBT system includes:
+    // - Student Login & Dashboard with cross-device resume
+    // - Browser lock for closed-book exams
+    // - Real-time progress tracking
+    // - Admin panel for full management
+    
     // ==================== SUPABASE CONFIGURATION ====================
     const SUPABASE_URL = 'https://zmbnltthcgpfsyxruawy.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InptYm5sdHRoY2dwZnN5eHJ1YXd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUzNTI3MDYsImV4cCI6MjA4MDkyODcwNn0.tLQwIXAlAVqvNfVvZozv9TzUqoKfv71RMIiFV-9XtAQ';
@@ -222,34 +248,36 @@
     try {
       supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
       isSupabaseConfigured = true;
-      console.log('✅ Database connected successfully!');
+      console.log('✅ Supabase connected successfully!');
       
       // Test connection
       supabase.from('subjects').select('count').then(result => {
         if (result.error) {
-          console.error('❌ Database connection test failed:', result.error);
+          console.error('❌ Supabase connection test failed:', result.error);
           isSupabaseConfigured = false;
         } else {
           console.log('✅ Supabase connection test passed');
         }
       });
     } catch (error) {
-      console.error('❌ Error initializing Database:', error);
+      console.error('❌ Error initializing Supabase:', error);
       isSupabaseConfigured = false;
     }
 
     // ==================== LOCAL STORAGE KEYS ====================
     const STORAGE_KEYS = {
       STUDENT_SESSION: 'cbt_student_session',
-      EXAM_STATE: 'cbt_exam_state',
       TIMER_STATE: 'cbt_timer_state',
-      ADMIN_STATE: 'cbt_admin_state'
+      EXAM_STATE: 'cbt_exam_state',
+      ADMIN_STATE: 'cbt_admin_state',
+      LOGGED_USER: 'cbt_logged_user'
     };
 
     // ==================== APPLICATION STATE ====================
     let appState = {
       currentView: 'role-selection',
       currentRole: null,
+      loggedUser: null, // NEW: Store logged user data
       studentId: null,
       studentName: '',
       studentClass: '',
@@ -265,39 +293,73 @@
       currentSubjectFilter: 'all',
       selectedQuestions: new Set(),
       bulkEditMode: false,
-      currentExamToken: ''
+      currentExamToken: '',
+      currentExam: null, // NEW: Store current exam data including is_open_book
+      violationCount: 0, // NEW: Track tab switch violations
+      isInFullscreen: false // NEW: Track fullscreen status
     };
 
     // Initialize app function
     function initializeApp() {
       console.log('🚀 Initializing CBT Application...');
-      const hasRestoredState = loadStateFromLocalStorage();
-      const hasAdminState = loadAdminStateFromLocalStorage();
       
-      if (hasRestoredState && appState.examSessionId) {
-        console.log('✅ Restored previous session');
-        appState.currentView = 'student';
-        startTimer();
-        renderStudentInterface();
-      } else if (hasAdminState && appState.currentRole === 'admin') {
+      // Try to restore logged user
+      const loggedUser = loadLoggedUser();
+      if (loggedUser) {
+        appState.loggedUser = loggedUser;
+        if (loggedUser.role === 'student') {
+          console.log('✅ Restored student login');
+          appState.currentRole = 'student';
+          renderStudentDashboard();
+          return;
+        }
+      }
+
+      // Try to restore admin session
+      const hasAdminState = loadAdminStateFromLocalStorage();
+      if (hasAdminState && appState.currentRole === 'admin') {
         console.log('✅ Restored admin session');
         renderAdminView();
-      } else {
-        console.log('✅ Starting fresh - Rendering role selection');
-        renderRoleSelection();
+        return;
       }
+
+      console.log('✅ Starting fresh - Rendering role selection');
+      renderRoleSelection();
     }
 
     // Wait for DOM to be ready
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', initializeApp);
     } else {
-      // DOM already ready
       initializeApp();
     }
 
     // ==================== STATE PERSISTENCE FUNCTIONS ====================
     
+    function saveLoggedUser(userData) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.LOGGED_USER, JSON.stringify(userData));
+      } catch (error) {
+        console.error('Error saving logged user:', error);
+      }
+    }
+
+    function loadLoggedUser() {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEYS.LOGGED_USER);
+        if (saved) {
+          return JSON.parse(saved);
+        }
+      } catch (error) {
+        console.error('Error loading logged user:', error);
+      }
+      return null;
+    }
+
+    function clearLoggedUser() {
+      localStorage.removeItem(STORAGE_KEYS.LOGGED_USER);
+    }
+
     function saveStateToLocalStorage() {
       try {
         if (appState.examSessionId) {
@@ -312,7 +374,8 @@
             examQuestions: appState.examQuestions,
             answers: Array.from(appState.answers.entries()),
             remainingSeconds: appState.remainingSeconds,
-            currentExamToken: appState.currentExamToken
+            currentExamToken: appState.currentExamToken,
+            violationCount: appState.violationCount
           };
           
           localStorage.setItem(STORAGE_KEYS.STUDENT_SESSION, JSON.stringify(stateToSave));
@@ -340,6 +403,7 @@
           appState.answers = new Map(parsed.answers || []);
           appState.remainingSeconds = parsed.remainingSeconds || 0;
           appState.currentExamToken = parsed.currentExamToken || '';
+          appState.violationCount = parsed.violationCount || 0;
           return true;
         }
       } catch (error) {
@@ -450,12 +514,11 @@
 
     // ==================== SUPABASE DATABASE FUNCTIONS ====================
     
-    // Cache untuk optimasi performa dengan 200 siswa
+    // Cache untuk optimasi performa
     let cachedSubjects = null;
     let cachedSubjectsTime = null;
     const CACHE_DURATION = 5 * 60 * 1000; // 5 menit
 
-    // Subjects
     async function getSubjects(forceRefresh = false) {
       if (!isSupabaseConfigured) return [];
       
@@ -571,6 +634,30 @@
       cachedUsersTime = null;
     }
 
+    // NEW: Login user function
+    async function loginUser(userId, password) {
+      if (!isSupabaseConfigured) {
+        showToast('Supabase belum dikonfigurasi!', 'error');
+        return null;
+      }
+      
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('password', password)
+          .single();
+        
+        if (error) throw error;
+        
+        return data;
+      } catch (error) {
+        console.error('Error logging in:', error);
+        return null;
+      }
+    }
+
     async function addUser(userData) {
       if (!isSupabaseConfigured) {
         showToast('Supabase belum dikonfigurasi!', 'error');
@@ -616,7 +703,7 @@
       }
     }
 
-    // Cache questions per subject
+    // Cache questions
     let cachedQuestions = new Map();
     let cachedQuestionsTime = new Map();
 
@@ -785,6 +872,26 @@
       }
     }
 
+    async function updateExam(id, updates) {
+      if (!isSupabaseConfigured) return false;
+      
+      try {
+        const { error } = await supabase
+          .from('exams')
+          .update(updates)
+          .eq('id', id);
+        
+        if (error) throw error;
+        
+        clearExamsCache();
+        
+        return true;
+      } catch (error) {
+        console.error('Error updating exam:', error);
+        return false;
+      }
+    }
+
     async function deleteExam(id) {
       if (!isSupabaseConfigured) return false;
       
@@ -858,10 +965,50 @@
       }
     }
 
+    // NEW: Get student sessions by student ID
+    async function getStudentSessions(studentId) {
+      if (!isSupabaseConfigured) return [];
+      
+      try {
+        const { data, error } = await supabase
+          .from('student_sessions')
+          .select('*')
+          .eq('student_id', studentId)
+          .order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        return data || [];
+      } catch (error) {
+        console.error('Error fetching student sessions:', error);
+        return [];
+      }
+    }
+
+    // NEW: Get active session for student and exam
+    async function getActiveSession(studentId, examToken) {
+      if (!isSupabaseConfigured) return null;
+      
+      try {
+        const { data, error } = await supabase
+          .from('student_sessions')
+          .select('*')
+          .eq('student_id', studentId)
+          .eq('exam_token', examToken)
+          .eq('status', 'active')
+          .maybeSingle();
+        
+        if (error) throw error;
+        return data;
+      } catch (error) {
+        console.error('Error fetching active session:', error);
+        return null;
+      }
+    }
+
     // Cache sessions
     let cachedSessions = null;
     let cachedSessionsTime = null;
-    const SESSION_CACHE_DURATION = 10000; // 10 detik untuk monitoring real-time
+    const SESSION_CACHE_DURATION = 10000; // 10 detik
 
     async function getActiveSessions(forceRefresh = false) {
       if (!isSupabaseConfigured) return [];
@@ -942,6 +1089,7 @@
       if (!isSupabaseConfigured) return null;
       
       try {
+        // Check if answer already exists
         const { data: existing, error: fetchError } = await supabase
           .from('student_answers')
           .select('id')
@@ -950,6 +1098,7 @@
           .maybeSingle();
 
         if (existing) {
+          // Update existing answer
           const { data, error } = await supabase
             .from('student_answers')
             .update({
@@ -962,6 +1111,7 @@
           if (error) throw error;
           return data[0];
         } else {
+          // Insert new answer
           const { data, error } = await supabase
             .from('student_answers')
             .insert([answerData])
@@ -1005,19 +1155,23 @@
         
         const allQuestions = data || [];
         
+        // Check if exam has pg_count and pgk_count (specific type split)
         if (exam.pg_count !== undefined && exam.pgk_count !== undefined) {
           const pgQuestions = allQuestions.filter(q => q.type === 'pg');
           const pgkQuestions = allQuestions.filter(q => q.type === 'pgk');
           
+          // Shuffle and take required count
           const shuffledPg = pgQuestions.sort(() => Math.random() - 0.5);
           const shuffledPgk = pgkQuestions.sort(() => Math.random() - 0.5);
           
           const selectedPg = shuffledPg.slice(0, exam.pg_count);
           const selectedPgk = shuffledPgk.slice(0, exam.pgk_count);
           
+          // Combine and shuffle again
           const combined = [...selectedPg, ...selectedPgk];
           return combined.sort(() => Math.random() - 0.5);
         }
+        // Check if exam has difficulty-based distribution with type split
         else if (exam.pg_easy_count !== undefined) {
           const pgEasyQuestions = allQuestions.filter(q => q.type === 'pg' && q.difficulty === 'easy');
           const pgMediumQuestions = allQuestions.filter(q => q.type === 'pg' && q.difficulty === 'medium');
@@ -1050,6 +1204,7 @@
           ];
           return combined.sort(() => Math.random() - 0.5);
         }
+        // Check if exam has difficulty-based distribution (generic)
         else if (exam.easy_count !== undefined && exam.medium_count !== undefined && exam.hard_count !== undefined) {
           const easyQuestions = allQuestions.filter(q => q.difficulty === 'easy');
           const mediumQuestions = allQuestions.filter(q => q.difficulty === 'medium');
@@ -1066,6 +1221,7 @@
           const combined = [...selectedEasy, ...selectedMedium, ...selectedHard];
           return combined.sort(() => Math.random() - 0.5);
         } else {
+          // Default: random selection
           const shuffled = allQuestions.sort(() => Math.random() - 0.5);
           return shuffled.slice(0, Math.min(exam.total_questions, shuffled.length));
         }
@@ -1073,6 +1229,819 @@
         console.error('Error fetching random questions:', error);
         return [];
       }
+    }
+
+    // ==================== BROWSER LOCK FUNCTIONS ====================
+    
+    function setupBrowserLock() {
+      if (!appState.currentExam || appState.currentExam.is_open_book) {
+        console.log('Open book exam - No browser lock');
+        return;
+      }
+
+      console.log('🔒 Setting up browser lock for closed book exam');
+
+      // Detect tab switch / visibility change
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.addEventListener('blur', handleWindowBlur);
+
+      // Try to enter fullscreen
+      requestFullscreen();
+    }
+
+    function removeBrowserLock() {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+      exitFullscreen();
+    }
+
+    function handleVisibilityChange() {
+      if (document.hidden) {
+        handleViolation('Anda meninggalkan tab ujian!');
+      }
+    }
+
+    function handleWindowBlur() {
+      if (!document.hidden && appState.currentExam && !appState.currentExam.is_open_book) {
+        handleViolation('Jangan pindah ke aplikasi lain!');
+      }
+    }
+
+    function handleViolation(message) {
+      appState.violationCount++;
+      saveStateToLocalStorage();
+
+      showViolationWarning(message, appState.violationCount);
+
+      // Update violation count to server
+      if (appState.examSessionId) {
+        updateStudentSession(appState.examSessionId, {
+          violation_count: appState.violationCount
+        });
+      }
+
+      // Auto-submit after 3 violations
+      if (appState.violationCount >= 3) {
+        showToast('Terlalu banyak pelanggaran! Ujian diselesaikan otomatis.', 'error');
+        setTimeout(() => {
+          finishExam();
+        }, 2000);
+      }
+    }
+
+    function showViolationWarning(message, count) {
+      const warning = document.createElement('div');
+      warning.className = 'warning-overlay';
+      warning.innerHTML = `
+        <div class="bg-white rounded-2xl p-12 max-w-md text-center shadow-2xl">
+          <svg class="w-24 h-24 mx-auto text-red-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+          </svg>
+          <h2 class="text-3xl font-bold text-red-600 mb-4">⚠️ PERINGATAN!</h2>
+          <p class="text-xl font-semibold text-gray-900 mb-2">${message}</p>
+          <p class="text-lg text-gray-700 mb-6">Pelanggaran ke-${count} dari 3</p>
+          <p class="text-md text-gray-600 mb-8">Setelah 3 pelanggaran, ujian akan diselesaikan otomatis!</p>
+          <button onclick="closeViolationWarning()" class="px-8 py-4 bg-red-600 text-white rounded-lg font-bold text-lg hover:bg-red-700 transition">
+            Saya Mengerti, Kembali ke Ujian
+          </button>
+        </div>
+      `;
+      document.body.appendChild(warning);
+    }
+
+    function closeViolationWarning() {
+      const warning = document.querySelector('.warning-overlay');
+      if (warning) {
+        document.body.removeChild(warning);
+        // Try to refocus on exam
+        window.focus();
+        requestFullscreen();
+      }
+    }
+
+    function requestFullscreen() {
+      const elem = document.documentElement;
+      if (elem.requestFullscreen) {
+        elem.requestFullscreen().catch(err => {
+          console.log('Fullscreen request failed:', err);
+        });
+      } else if (elem.webkitRequestFullscreen) {
+        elem.webkitRequestFullscreen();
+      } else if (elem.msRequestFullscreen) {
+        elem.msRequestFullscreen();
+      }
+    }
+
+    function exitFullscreen() {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(err => console.log('Exit fullscreen failed:', err));
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      } else if (document.msExitFullscreen) {
+        document.msExitFullscreen();
+      }
+    }
+
+    // ==================== STUDENT FUNCTIONS ====================
+    
+    // NEW: Student Login
+    async function handleStudentLogin(event) {
+      event.preventDefault();
+      
+      const userId = document.getElementById('studentUserId').value.trim();
+      const password = document.getElementById('studentPassword').value.trim();
+
+      if (!userId || !password) {
+        showToast('NISN dan Password wajib diisi!', 'error');
+        return;
+      }
+
+      showLoading();
+      const user = await loginUser(userId, password);
+      hideLoading();
+
+      if (user) {
+        if (user.role !== 'student') {
+          showToast('Akun ini bukan akun siswa!', 'error');
+          return;
+        }
+
+        appState.loggedUser = user;
+        appState.studentId = user.user_id;
+        appState.studentName = user.name;
+        appState.studentClass = user.class;
+        appState.currentRole = 'student';
+
+        saveLoggedUser(user);
+        showToast(`Selamat datang, ${user.name}!`, 'success');
+        renderStudentDashboard();
+      } else {
+        showToast('NISN atau Password salah!', 'error');
+      }
+    }
+
+    // NEW: Render Student Dashboard
+    async function renderStudentDashboard() {
+      showLoading();
+      
+      // Get all sessions for this student
+      const sessions = await getStudentSessions(appState.studentId);
+      
+      // Get all available exams
+      const allExams = await getExams();
+      
+      hideLoading();
+
+      // Categorize sessions
+      const activeSessions = sessions.filter(s => s.status === 'active');
+      const finishedSessions = sessions.filter(s => s.status === 'finished');
+      
+      // Find available exams (not yet taken or not finished)
+      const takenExamTokens = sessions.map(s => s.exam_token);
+      const availableExams = allExams.filter(exam => !takenExamTokens.includes(exam.token));
+
+      const app = document.getElementById('app');
+      
+      app.innerHTML = `
+        <div class="min-h-full" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
+          <nav class="bg-white shadow-lg">
+            <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+              <div>
+                <h1 class="text-2xl font-bold text-gray-900">Dashboard Siswa</h1>
+                <p class="text-sm text-gray-600">${appState.studentName} - ${appState.studentClass}</p>
+              </div>
+              <button onclick="studentLogout()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">
+                Logout
+              </button>
+            </div>
+          </nav>
+
+          <div class="max-w-7xl mx-auto p-8">
+            <!-- Active Exams -->
+            ${activeSessions.length > 0 ? `
+              <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+                <h3 class="text-2xl font-bold text-gray-900 mb-4">🔥 Ujian Sedang Dikerjakan</h3>
+                <div class="grid md:grid-cols-2 gap-4">
+                  ${activeSessions.map(session => `
+                    <div class="border-2 border-orange-500 rounded-lg p-6 bg-orange-50">
+                      <h4 class="text-xl font-bold text-gray-900 mb-2">${session.exam_title}</h4>
+                      <div class="space-y-2 text-sm text-gray-700 mb-4">
+                        <p>📝 Soal Terjawab: ${session.answered_count} / ${session.total_questions}</p>
+                        <p>⏱️ Sisa Waktu: ${formatTime(session.remaining_seconds)}</p>
+                        <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                          <div class="bg-orange-500 h-2 rounded-full" style="width: ${Math.round((session.answered_count / session.total_questions) * 100)}%"></div>
+                        </div>
+                      </div>
+                      <button onclick="resumeExam('${session.exam_token}')" class="w-full px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold hover:bg-orange-700 transition">
+                        ▶️ Lanjutkan Ujian
+                      </button>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+
+            <!-- Available Exams -->
+            ${availableExams.length > 0 ? `
+              <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+                <h3 class="text-2xl font-bold text-gray-900 mb-4">📚 Ujian Tersedia</h3>
+                <div class="grid md:grid-cols-2 gap-4">
+                  ${availableExams.map(exam => `
+                    <div class="border-2 border-green-500 rounded-lg p-6 bg-green-50">
+                      <h4 class="text-xl font-bold text-gray-900 mb-2">${exam.title}</h4>
+                      <div class="space-y-2 text-sm text-gray-700 mb-4">
+                        <p>📖 Mata Pelajaran: ${exam.subject}</p>
+                        <p>📝 Jumlah Soal: ${exam.total_questions}</p>
+                        <p>⏱️ Durasi: ${exam.duration} menit</p>
+                        <p>🔖 Token: <span class="font-mono font-bold text-green-700">${exam.token}</span></p>
+                        <p class="flex items-center gap-2">
+                          ${exam.is_open_book ? 
+                            '<span class="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-semibold">📖 Open Book</span>' : 
+                            '<span class="px-2 py-1 bg-red-100 text-red-800 rounded text-xs font-semibold">🔒 Closed Book</span>'}
+                        </p>
+                      </div>
+                      <button onclick="startNewExam('${exam.token}')" class="w-full px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
+                        🚀 Mulai Ujian
+                      </button>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
+
+            <!-- Finished Exams -->
+            ${finishedSessions.length > 0 ? `
+              <div class="bg-white rounded-xl shadow-xl p-8">
+                <h3 class="text-2xl font-bold text-gray-900 mb-4">✅ Riwayat Ujian</h3>
+                <div class="overflow-x-auto">
+                  <table class="w-full">
+                    <thead class="bg-gray-50">
+                      <tr>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Ujian</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Tanggal</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Nilai</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200">
+                      ${finishedSessions.map(session => `
+                        <tr class="hover:bg-gray-50">
+                          <td class="px-6 py-4 text-gray-900">${session.exam_title}</td>
+                          <td class="px-6 py-4 text-gray-600">${new Date(session.finished_at).toLocaleString('id-ID')}</td>
+                          <td class="px-6 py-4 text-center">
+                            <span class="text-2xl font-bold ${session.score >= 75 ? 'text-green-600' : session.score >= 60 ? 'text-yellow-600' : 'text-red-600'}">
+                              ${session.score || '-'}
+                            </span>
+                          </td>
+                          <td class="px-6 py-4 text-center">
+                            <span class="px-3 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800">
+                              Selesai
+                            </span>
+                          </td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ` : ''}
+
+            ${activeSessions.length === 0 && availableExams.length === 0 && finishedSessions.length === 0 ? `
+              <div class="bg-white rounded-xl shadow-xl p-12 text-center">
+                <svg class="w-24 h-24 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                <h3 class="text-2xl font-bold text-gray-700 mb-2">Belum Ada Ujian</h3>
+                <p class="text-gray-500">Saat ini belum ada ujian yang tersedia untuk Anda.</p>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function formatTime(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function studentLogout() {
+      clearLoggedUser();
+      clearStateFromLocalStorage();
+      appState.loggedUser = null;
+      appState.currentRole = null;
+      appState.studentId = null;
+      appState.studentName = '';
+      appState.studentClass = '';
+      renderRoleSelection();
+    }
+
+    // NEW: Resume exam from server
+    async function resumeExam(examToken) {
+      showLoading();
+
+      // Get exam data
+      const exam = await getExamByToken(examToken);
+      if (!exam) {
+        hideLoading();
+        showToast('Token ujian tidak valid!', 'error');
+        return;
+      }
+
+      // Get active session
+      const session = await getActiveSession(appState.studentId, examToken);
+      if (!session) {
+        hideLoading();
+        showToast('Sesi ujian tidak ditemukan!', 'error');
+        return;
+      }
+
+      // Parse questions from session
+      const questions = JSON.parse(session.questions_data);
+
+      // Get saved answers
+      const savedAnswers = await getSessionAnswers(session.id);
+
+      // Restore state
+      appState.examSessionId = session.id;
+      appState.examTitle = exam.title;
+      appState.examSubject = exam.subject;
+      appState.currentView = 'student-exam';
+      appState.remainingSeconds = session.remaining_seconds;
+      appState.totalQuestions = questions.length;
+      appState.examQuestions = questions;
+      appState.currentExamToken = examToken;
+      appState.currentExam = exam;
+      appState.violationCount = session.violation_count || 0;
+
+      // Restore answers
+      appState.answers.clear();
+      savedAnswers.forEach(ans => {
+        appState.answers.set(ans.question_number, {
+          answer: ans.answer,
+          isDoubtful: ans.is_doubtful
+        });
+      });
+
+      // Find last answered question or start from beginning
+      let lastAnsweredIndex = 0;
+      for (let i = questions.length - 1; i >= 0; i--) {
+        const ans = appState.answers.get(i + 1);
+        if (ans && ans.answer) {
+          lastAnsweredIndex = i;
+          break;
+        }
+      }
+      appState.currentQuestionIndex = lastAnsweredIndex;
+
+      hideLoading();
+
+      showToast('Melanjutkan ujian...', 'success');
+      saveStateToLocalStorage();
+      startTimer();
+      setupBrowserLock();
+      renderStudentInterface();
+    }
+
+    // NEW: Start new exam
+    async function startNewExam(examToken) {
+      showLoading();
+      
+      const exam = await getExamByToken(examToken);
+      
+      if (!exam) {
+        hideLoading();
+        showToast('Token ujian tidak valid!', 'error');
+        return;
+      }
+
+      // Check if there's already an active session
+      const existingSession = await getActiveSession(appState.studentId, examToken);
+      if (existingSession) {
+        hideLoading();
+        showToast('Anda sudah memiliki sesi aktif untuk ujian ini!', 'warning');
+        await resumeExam(examToken);
+        return;
+      }
+
+      // Generate questions
+      const questions = await getRandomQuestionsBySubject(exam);
+      
+      if (questions.length === 0) {
+        hideLoading();
+        showToast(`Belum ada soal tersedia untuk mata pelajaran ${exam.subject}!`, 'error');
+        return;
+      }
+
+      if (questions.length < exam.total_questions) {
+        hideLoading();
+        showToast(`Soal tidak cukup! Hanya tersedia ${questions.length} soal untuk ${exam.subject}`, 'error');
+        return;
+      }
+
+      // Create session
+      const session = await createStudentSession({
+        student_id: appState.studentId,
+        student_name: appState.studentName,
+        student_class: appState.studentClass,
+        exam_token: examToken,
+        exam_title: exam.title,
+        total_questions: questions.length,
+        answered_count: 0,
+        remaining_seconds: exam.duration * 60,
+        status: 'active',
+        questions_data: JSON.stringify(questions),
+        violation_count: 0
+      });
+
+      hideLoading();
+
+      if (session) {
+        appState.examSessionId = session.id;
+        appState.examTitle = exam.title;
+        appState.examSubject = exam.subject;
+        appState.currentView = 'student-exam';
+        appState.remainingSeconds = exam.duration * 60;
+        appState.answers.clear();
+        appState.currentQuestionIndex = 0;
+        appState.totalQuestions = questions.length;
+        appState.examQuestions = questions;
+        appState.currentExamToken = examToken;
+        appState.currentExam = exam;
+        appState.violationCount = 0;
+
+        showToast(`Ujian ${exam.title} dimulai!`, 'success');
+        
+        saveStateToLocalStorage();
+        
+        startTimer();
+        setupBrowserLock();
+        renderStudentInterface();
+      }
+    }
+
+    // Auto-check untuk session yang waktu habis di monitoring
+    async function autoFinishExpiredSessions() {
+      if (!isSupabaseConfigured) return;
+      
+      try {
+        const { data: activeSessions, error } = await supabase
+          .from('student_sessions')
+          .select('*')
+          .eq('status', 'active')
+          .lte('remaining_seconds', 0);
+        
+        if (error) throw error;
+        
+        if (activeSessions && activeSessions.length > 0) {
+          for (const session of activeSessions) {
+            await finishSession(session.id);
+          }
+        }
+      } catch (error) {
+        console.error('Error auto-finishing expired sessions:', error);
+      }
+    }
+
+    function startTimer() {
+      if (appState.timerInterval) clearInterval(appState.timerInterval);
+      
+      appState.timerInterval = setInterval(async () => {
+        appState.remainingSeconds--;
+        
+        if (appState.remainingSeconds <= 0) {
+          clearInterval(appState.timerInterval);
+          showToast('Waktu habis! Ujian diselesaikan otomatis', 'warning');
+          await finishExam();
+        } else {
+          updateTimerDisplay();
+          saveStateToLocalStorage();
+          
+          // Update session setiap 30 detik
+          if (appState.remainingSeconds % 30 === 0) {
+            const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
+            await updateStudentSession(appState.examSessionId, {
+              answered_count: answeredCount,
+              remaining_seconds: appState.remainingSeconds
+            });
+          }
+        }
+      }, 1000);
+    }
+
+    function updateTimerDisplay() {
+      const hours = Math.floor(appState.remainingSeconds / 3600);
+      const minutes = Math.floor((appState.remainingSeconds % 3600) / 60);
+      const seconds = appState.remainingSeconds % 60;
+      
+      const timerEl = document.getElementById('timer');
+      if (timerEl) {
+        timerEl.textContent = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        
+        if (appState.remainingSeconds <= 300) {
+          timerEl.classList.add('timer-warning');
+        }
+      }
+    }
+
+    async function selectAnswer(answer) {
+      const questionNumber = appState.currentQuestionIndex + 1;
+      
+      appState.answers.set(questionNumber, {
+        answer: answer,
+        isDoubtful: false
+      });
+
+      // Save to database
+      await saveAnswer({
+        session_id: appState.examSessionId,
+        question_number: questionNumber,
+        answer: answer,
+        is_doubtful: false
+      });
+
+      // Update answered count
+      const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
+      await updateStudentSession(appState.examSessionId, {
+        answered_count: answeredCount
+      });
+
+      saveStateToLocalStorage();
+      renderQuestionContent();
+      renderQuestionNavigator();
+    }
+
+    async function togglePGKAnswer(option) {
+      const questionNumber = appState.currentQuestionIndex + 1;
+      const current = appState.answers.get(questionNumber);
+      
+      let selectedAnswers = [];
+      if (current && current.answer) {
+        selectedAnswers = current.answer.split(',').filter(a => a);
+      }
+      
+      const index = selectedAnswers.indexOf(option);
+      if (index > -1) {
+        selectedAnswers.splice(index, 1);
+      } else {
+        selectedAnswers.push(option);
+      }
+      
+      selectedAnswers.sort();
+      const answerString = selectedAnswers.join(',');
+      
+      appState.answers.set(questionNumber, {
+        answer: answerString,
+        isDoubtful: false
+      });
+
+      // Save to database
+      await saveAnswer({
+        session_id: appState.examSessionId,
+        question_number: questionNumber,
+        answer: answerString,
+        is_doubtful: false
+      });
+
+      // Update answered count
+      const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
+      await updateStudentSession(appState.examSessionId, {
+        answered_count: answeredCount
+      });
+
+      saveStateToLocalStorage();
+      renderQuestionContent();
+      renderQuestionNavigator();
+    }
+
+    async function markAsDoubtful() {
+      const questionNumber = appState.currentQuestionIndex + 1;
+      const current = appState.answers.get(questionNumber);
+      
+      if (current) {
+        current.isDoubtful = true;
+        appState.answers.set(questionNumber, current);
+        await saveAnswer({
+          session_id: appState.examSessionId,
+          question_number: questionNumber,
+          answer: current.answer,
+          is_doubtful: true
+        });
+      } else {
+        appState.answers.set(questionNumber, {
+          answer: '',
+          isDoubtful: true
+        });
+        await saveAnswer({
+          session_id: appState.examSessionId,
+          question_number: questionNumber,
+          answer: '',
+          is_doubtful: true
+        });
+      }
+
+      saveStateToLocalStorage();
+      renderQuestionNavigator();
+      showToast('Soal ditandai ragu-ragu', 'info');
+    }
+
+    function goToQuestion(index) {
+      appState.currentQuestionIndex = index;
+      renderQuestionContent();
+      renderQuestionNavigator();
+    }
+
+    function previousQuestion() {
+      if (appState.currentQuestionIndex > 0) {
+        appState.currentQuestionIndex--;
+        renderQuestionContent();
+        renderQuestionNavigator();
+      }
+    }
+
+    function nextQuestion() {
+      if (appState.currentQuestionIndex < appState.totalQuestions - 1) {
+        appState.currentQuestionIndex++;
+        renderQuestionContent();
+        renderQuestionNavigator();
+      }
+    }
+
+    function showFinishConfirmation() {
+      const answered = Array.from(appState.answers.values()).filter(a => a.answer).length;
+      const unanswered = appState.totalQuestions - answered;
+
+      const modal = document.createElement('div');
+      modal.className = 'fixed inset-0 bg-black bg-opacity-50 modal-backdrop flex items-center justify-center z-50 fade-in';
+      modal.innerHTML = `
+        <div class="bg-white rounded-lg p-8 max-w-md mx-4 shadow-2xl">
+          <h3 class="text-2xl font-bold text-gray-900 mb-4">Konfirmasi Selesai Ujian</h3>
+          <div class="mb-6 space-y-2">
+            <p class="text-gray-700">Soal dijawab: <span class="font-semibold text-green-600">${answered}</span></p>
+            <p class="text-gray-700">Belum dijawab: <span class="font-semibold text-red-600">${unanswered}</span></p>
+            ${unanswered > 0 ? '<p class="text-sm text-orange-600 mt-4">⚠️ Masih ada soal yang belum dijawab!</p>' : ''}
+          </div>
+          <p class="text-gray-600 mb-6">Apakah Anda yakin ingin menyelesaikan ujian?</p>
+          <div class="flex gap-3">
+            <button id="cancelFinish" class="flex-1 px-4 py-3 bg-gray-200 text-gray-800 rounded-lg font-medium hover:bg-gray-300 transition">
+              Batal
+            </button>
+            <button id="confirmFinish" class="flex-1 px-4 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition">
+              Ya, Selesai
+            </button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(modal);
+
+      document.getElementById('cancelFinish').onclick = () => {
+        document.body.removeChild(modal);
+      };
+
+      document.getElementById('confirmFinish').onclick = async () => {
+        document.body.removeChild(modal);
+        await finishExam();
+      };
+    }
+
+    async function finishExam() {
+      if (appState.timerInterval) {
+        clearInterval(appState.timerInterval);
+      }
+
+      // Remove browser lock
+      removeBrowserLock();
+
+      // Hitung nilai
+      let correctCount = 0;
+      let totalPoints = 0;
+      let earnedPoints = 0;
+
+      appState.examQuestions.forEach((question, index) => {
+        const questionNumber = index + 1;
+        const studentAnswer = appState.answers.get(questionNumber);
+        
+        if (studentAnswer && studentAnswer.answer) {
+          totalPoints += question.points;
+          
+          if (question.type === 'pg') {
+            if (studentAnswer.answer === question.correct_answer) {
+              correctCount++;
+              earnedPoints += question.points;
+            }
+          } else if (question.type === 'pgk') {
+            const correctAnswers = question.correct_answers.split(',').sort().join(',');
+            const studentAnswers = studentAnswer.answer.split(',').sort().join(',');
+            
+            if (studentAnswers === correctAnswers) {
+              correctCount++;
+              earnedPoints += question.points;
+            }
+          }
+        } else {
+          totalPoints += question.points;
+        }
+      });
+
+      const score = totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 100) : 0;
+
+      // Update session dengan nilai
+      await updateStudentSession(appState.examSessionId, {
+        status: 'finished',
+        finished_at: new Date().toISOString(),
+        score: score,
+        correct_count: correctCount,
+        total_points: totalPoints,
+        earned_points: earnedPoints
+      });
+      
+      clearStateFromLocalStorage();
+      showResultPage(appState.answers.size, appState.totalQuestions, score, correctCount);
+    }
+
+    function showResultPage(answered, total, score, correctCount) {
+      const app = document.getElementById('app');
+      
+      let gradeColor = 'text-red-600';
+      let gradeBg = 'bg-red-50';
+      let gradeText = 'Perlu Belajar Lebih Giat';
+      
+      if (score >= 90) {
+        gradeColor = 'text-green-600';
+        gradeBg = 'bg-green-50';
+        gradeText = 'Luar Biasa! 🏆';
+      } else if (score >= 80) {
+        gradeColor = 'text-blue-600';
+        gradeBg = 'bg-blue-50';
+        gradeText = 'Sangat Baik! 🌟';
+      } else if (score >= 70) {
+        gradeColor = 'text-yellow-600';
+        gradeBg = 'bg-yellow-50';
+        gradeText = 'Baik! 👍';
+      } else if (score >= 60) {
+        gradeColor = 'text-orange-600';
+        gradeBg = 'bg-orange-50';
+        gradeText = 'Cukup';
+      }
+      
+      app.innerHTML = `
+        <div class="min-h-full flex items-center justify-center p-8" style="background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);">
+          <div class="bg-white rounded-2xl shadow-2xl p-12 max-w-3xl w-full text-center fade-in">
+            <div class="mb-6">
+              <svg class="w-24 h-24 mx-auto text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+            </div>
+            <h2 class="text-4xl font-bold mb-2 text-gray-900">Ujian Selesai!</h2>
+            <p class="text-xl text-gray-600 mb-2">Terima kasih ${appState.studentName}</p>
+            <p class="text-md text-gray-500 mb-8">${appState.examTitle}</p>
+            
+            <div class="${gradeBg} rounded-xl p-6 mb-6">
+              <p class="text-sm text-gray-600 mb-2">Nilai Akhir</p>
+              <p class="text-6xl font-bold ${gradeColor} mb-2">${score}</p>
+              <p class="text-lg font-semibold ${gradeColor}">${gradeText}</p>
+            </div>
+            
+            <div class="bg-gray-50 rounded-xl p-6 mb-8">
+              <div class="grid grid-cols-4 gap-4 mb-4">
+                <div class="text-center">
+                  <p class="text-gray-500 text-sm mb-1">Benar</p>
+                  <p class="text-3xl font-bold text-green-600">${correctCount}</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-gray-500 text-sm mb-1">Salah</p>
+                  <p class="text-3xl font-bold text-red-600">${answered - correctCount}</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-gray-500 text-sm mb-1">Tidak Dijawab</p>
+                  <p class="text-3xl font-bold text-gray-600">${total - answered}</p>
+                </div>
+                <div class="text-center">
+                  <p class="text-gray-500 text-sm mb-1">Total Soal</p>
+                  <p class="text-3xl font-bold text-blue-600">${total}</p>
+                </div>
+              </div>
+              <div class="mt-4">
+                <div class="w-full bg-gray-200 rounded-full h-4">
+                  <div class="bg-green-500 h-4 rounded-full progress-bar" style="width: ${score}%"></div>
+                </div>
+                <p class="text-sm text-gray-600 mt-2">Persentase Nilai: ${score}%</p>
+              </div>
+            </div>
+
+            <button onclick="backToDashboard()" class="px-8 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
+              Kembali ke Dashboard
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function backToDashboard() {
+      renderStudentDashboard();
     }
 
     // ==================== ADMIN FUNCTIONS ====================
@@ -1144,6 +2113,7 @@
       const userName = document.getElementById('userName').value.trim();
       const userRole = document.getElementById('userRole').value;
       const userPassword = document.getElementById('userPassword').value;
+      const userClass = document.getElementById('userClass') ? document.getElementById('userClass').value.trim() : '';
 
       if (!userId || !userName || !userPassword) {
         showToast('Semua field wajib diisi!', 'error');
@@ -1155,7 +2125,8 @@
         user_id: userId,
         name: userName,
         role: userRole,
-        password: userPassword
+        password: userPassword,
+        class: userClass
       });
       hideLoading();
 
@@ -1213,13 +2184,13 @@
         ['2. Jangan ubah atau hapus header kolom'],
         ['3. Role yang valid: student, teacher, admin'],
         [],
-        ['NISN/ID', 'Nama Lengkap', 'Role', 'Password'],
-        ['1234567890', 'Ahmad Fauzi', 'student', 'pass123'],
-        ['0987654321', 'Siti Nurhaliza', 'student', 'pass123']
+        ['NISN/ID', 'Nama Lengkap', 'Kelas', 'Role', 'Password'],
+        ['1234567890', 'Ahmad Fauzi', 'X-TAV', 'student', 'pass123'],
+        ['0987654321', 'Siti Nurhaliza', 'XI-TKJ', 'student', 'pass123']
       ];
 
       const ws = XLSX.utils.aoa_to_sheet(wsData);
-      ws['!cols'] = [{ wch: 15 }, { wch: 25 }, { wch: 10 }, { wch: 15 }];
+      ws['!cols'] = [{ wch: 15 }, { wch: 25 }, { wch: 15 }, { wch: 10 }, { wch: 15 }];
       XLSX.utils.book_append_sheet(wb, ws, 'Template User');
       XLSX.writeFile(wb, 'Template_User_CBT.xlsx');
       showToast('Template Excel berhasil diunduh!', 'success');
@@ -1237,6 +2208,7 @@
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
           const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
           
+          // Find header row
           let headerRowIndex = -1;
           for (let i = 0; i < jsonData.length; i++) {
             const row = jsonData[i];
@@ -1260,12 +2232,12 @@
           
           for (let i = headerRowIndex + 1; i < jsonData.length; i++) {
             const row = jsonData[i];
-            if (!row || row.length < 3) {
+            if (!row || row.length < 4) {
               skipped++;
               continue;
             }
 
-            const [userId, name, role, password] = row;
+            const [userId, name, userClass, role, password] = row;
             
             if (!userId || !name) {
               skipped++;
@@ -1275,6 +2247,7 @@
             usersToInsert.push({
               user_id: String(userId),
               name: String(name),
+              class: String(userClass || ''),
               role: String(role || 'student').toLowerCase(),
               password: String(password || 'default123')
             });
@@ -1288,6 +2261,7 @@
                 .select();
               
               if (error) {
+                // Fallback to individual inserts
                 for (const userData of usersToInsert) {
                   const result = await addUser(userData);
                   if (result) imported++;
@@ -1299,6 +2273,7 @@
               }
             } catch (error) {
               console.error('Batch insert error:', error);
+              // Fallback to individual inserts
               for (const userData of usersToInsert) {
                 const result = await addUser(userData);
                 if (result) imported++;
@@ -1478,7 +2453,7 @@
       modal.className = 'fixed inset-0 bg-black bg-opacity-50 modal-backdrop flex items-center justify-center z-50 fade-in';
       modal.innerHTML = `
         <div class="bg-white rounded-lg p-8 max-w-2xl w-full mx-4 shadow-2xl">
-          <h3 class="text-2xl font-bold text-gray-900 mb-4">✏️ Edit Massal (${appState.selectedQuestions.size} Soal)</h3>
+          <h3 class="text-2xl font-bold text-gray-900 mb-4">���️ Edit Massal (${appState.selectedQuestions.size} Soal)</h3>
           
           <form id="bulkEditForm" class="space-y-4">
             <div class="border-2 border-gray-200 rounded-lg p-4">
@@ -1515,6 +2490,7 @@
 
       document.body.appendChild(modal);
 
+      // Enable/disable inputs based on checkboxes
       ['changeDifficulty', 'changePoints'].forEach(checkboxId => {
         const checkbox = document.getElementById(checkboxId);
         const inputId = checkboxId.replace('change', 'bulk');
@@ -1695,6 +2671,7 @@
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
           const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
           
+          // Find header row
           let headerRowIndex = -1;
           for (let i = 0; i < jsonData.length; i++) {
             const row = jsonData[i];
@@ -1726,6 +2703,7 @@
               }
 
               const type = String(row[0] || '').trim().toLowerCase();
+              // row[1] is subject - ignored as per instructions
               const questionText = String(row[2] || '').trim();
               const optionA = String(row[3] || '').trim();
               const optionB = String(row[4] || '').trim();
@@ -1787,6 +2765,7 @@
 
           if (questionsToInsert.length > 0) {
             try {
+              // Try batch insert first (max 50 per batch)
               const chunkSize = 50;
               for (let i = 0; i < questionsToInsert.length; i += chunkSize) {
                 const chunk = questionsToInsert.slice(i, i + chunkSize);
@@ -1796,6 +2775,7 @@
                   .select();
                 
                 if (error) {
+                  // Fallback to individual inserts for this chunk
                   for (const questionData of chunk) {
                     const result = await addQuestion(questionData);
                     if (result) imported++;
@@ -1808,6 +2788,7 @@
               clearQuestionsCache();
             } catch (error) {
               console.error('Batch insert error:', error);
+              // Fallback to individual inserts
               for (const questionData of questionsToInsert) {
                 const result = await addQuestion(questionData);
                 if (result) imported++;
@@ -1848,6 +2829,7 @@
       const examSubject = document.getElementById('examSubject').value;
       const pgPercent = parseInt(document.getElementById('pgPercent').value) || 0;
       const pgkPercent = parseInt(document.getElementById('pgkPercent').value) || 0;
+      const isOpenBook = document.getElementById('isOpenBook').checked;
       
       if (!examTitle || examDuration <= 0 || totalQuestions <= 0 || !examSubject) {
         showToast('Semua field wajib diisi dengan benar!', 'error');
@@ -1891,7 +2873,8 @@
         pg_percent: pgPercent,
         pgk_percent: pgkPercent,
         pg_count: pgCount,
-        pgk_count: pgkCount
+        pgk_count: pgkCount,
+        is_open_book: isOpenBook
       });
       hideLoading();
 
@@ -1967,7 +2950,7 @@
         ['LAPORAN HASIL UJIAN CBT'],
         ['Tanggal: ' + new Date().toLocaleDateString('id-ID')],
         [],
-        ['Nama', 'Kelas', 'Mata Pelajaran', 'Status', 'Soal Terjawab', 'Benar', 'Salah', 'Nilai', 'Progress (%)', 'Sisa Waktu']
+        ['Nama', 'Kelas', 'Mata Pelajaran', 'Status', 'Soal Terjawab', 'Benar', 'Salah', 'Nilai', 'Progress (%)', 'Sisa Waktu', 'Pelanggaran']
       ];
 
       sessions.forEach(record => {
@@ -1980,6 +2963,7 @@
         const score = record.score || '-';
         const correctCount = record.correct_count || 0;
         const wrongCount = record.answered_count - correctCount;
+        const violations = record.violation_count || 0;
         
         wsData.push([
           record.student_name,
@@ -1991,12 +2975,13 @@
           wrongCount,
           score,
           progress,
-          remainingTime
+          remainingTime,
+          violations
         ]);
       });
 
       const ws = XLSX.utils.aoa_to_sheet(wsData);
-      ws['!cols'] = [{ wch: 25 }, { wch: 15 }, { wch: 30 }, { wch: 30 }, { wch: 15 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 15 }];
+      ws['!cols'] = [{ wch: 25 }, { wch: 15 }, { wch: 30 }, { wch: 30 }, { wch: 15 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 15 }, { wch: 12 }];
       XLSX.utils.book_append_sheet(wb, ws, 'Laporan Ujian');
       XLSX.writeFile(wb, `Laporan_Ujian_${new Date().toISOString().split('T')[0]}.xlsx`);
       showToast('Laporan Excel berhasil diunduh!', 'success');
@@ -2068,526 +3053,6 @@
       };
     }
 
-    // ==================== STUDENT FUNCTIONS ====================
-    
-    async function handleStudentLogin(event) {
-      event.preventDefault();
-      const studentName = document.getElementById('studentName').value.trim();
-      const studentId = document.getElementById('studentId').value.trim();
-      const studentClass = document.getElementById('studentClass').value.trim();
-      const examToken = document.getElementById('examToken').value.trim().toUpperCase();
-
-      if (!studentName || !studentId || !studentClass || !examToken) {
-        showToast('Semua field wajib diisi!', 'error');
-        return;
-      }
-
-      showLoading();
-      const exam = await getExamByToken(examToken);
-      
-      if (!exam) {
-        hideLoading();
-        showToast('Token ujian tidak valid!', 'error');
-        return;
-      }
-
-      // Cek apakah siswa sudah punya session aktif untuk token ini
-      try {
-        const { data: existingSessions, error } = await supabase
-          .from('student_sessions')
-          .select('*')
-          .eq('student_id', studentId)
-          .eq('exam_token', examToken)
-          .eq('status', 'active')
-          .order('created_at', { ascending: false })
-          .limit(1);
-
-        if (!error && existingSessions && existingSessions.length > 0) {
-          const existingSession = existingSessions[0];
-          
-          // Ambil soal dari session yang ada
-          const sessionQuestions = JSON.parse(existingSession.questions_data || '[]');
-          
-          if (sessionQuestions.length > 0) {
-            // Lanjutkan session yang ada
-            hideLoading();
-            
-            const modal = document.createElement('div');
-            modal.className = 'fixed inset-0 bg-black bg-opacity-50 modal-backdrop flex items-center justify-center z-50 fade-in';
-            modal.innerHTML = `
-              <div class="bg-white rounded-lg p-8 max-w-md mx-4 shadow-2xl">
-                <h3 class="text-xl font-bold text-gray-900 mb-4">🎯 Ujian Sedang Berlangsung</h3>
-                <p class="text-gray-600 mb-4">Anda sudah memiliki ujian yang sedang berlangsung untuk token ini.</p>
-                <div class="bg-blue-50 rounded-lg p-4 mb-6">
-                  <p class="text-sm text-blue-800"><strong>Ujian:</strong> ${existingSession.exam_title}</p>
-                  <p class="text-sm text-blue-800"><strong>Progress:</strong> ${existingSession.answered_count}/${existingSession.total_questions} soal</p>
-                  <p class="text-sm text-blue-800"><strong>Sisa Waktu:</strong> ${Math.floor(existingSession.remaining_seconds / 60)} menit</p>
-                </div>
-                <div class="flex gap-3">
-                  <button id="cancelContinue" class="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition">
-                    Batal
-                  </button>
-                  <button id="confirmContinue" class="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
-                    Lanjutkan
-                  </button>
-                </div>
-              </div>
-            `;
-            
-            document.body.appendChild(modal);
-            
-            document.getElementById('cancelContinue').onclick = () => {
-              document.body.removeChild(modal);
-            };
-            
-            document.getElementById('confirmContinue').onclick = async () => {
-              document.body.removeChild(modal);
-              
-              // Restore session
-              appState.studentName = existingSession.student_name;
-              appState.studentId = existingSession.student_id;
-              appState.studentClass = existingSession.student_class;
-              appState.examSessionId = existingSession.id;
-              appState.examTitle = existingSession.exam_title;
-              appState.examSubject = exam.subject;
-              appState.currentView = 'student';
-              appState.remainingSeconds = existingSession.remaining_seconds;
-              appState.answers.clear();
-              appState.currentQuestionIndex = 0;
-              appState.totalQuestions = sessionQuestions.length;
-              appState.examQuestions = sessionQuestions;
-              appState.currentExamToken = examToken;
-
-              showToast(`Melanjutkan ujian ${studentName}!`, 'success');
-              
-              const answers = await getSessionAnswers(existingSession.id);
-              answers.forEach(ans => {
-                appState.answers.set(ans.question_number, {
-                  answer: ans.answer,
-                  isDoubtful: ans.is_doubtful
-                });
-              });
-
-              saveStateToLocalStorage();
-              startTimer();
-              renderStudentInterface();
-            };
-            
-            return;
-          }
-        }
-      } catch (error) {
-        console.error('Error checking existing session:', error);
-      }
-
-      const questions = await getRandomQuestionsBySubject(exam);
-      
-      if (questions.length === 0) {
-        hideLoading();
-        showToast(`Belum ada soal tersedia untuk mata pelajaran ${exam.subject}!`, 'error');
-        return;
-      }
-
-      if (questions.length < exam.total_questions) {
-        hideLoading();
-        showToast(`Soal tidak cukup! Hanya tersedia ${questions.length} soal untuk ${exam.subject}`, 'error');
-        return;
-      }
-
-      const session = await createStudentSession({
-        student_id: studentId,
-        student_name: studentName,
-        student_class: studentClass,
-        exam_token: examToken,
-        exam_title: exam.title,
-        total_questions: questions.length,
-        answered_count: 0,
-        remaining_seconds: exam.duration * 60,
-        status: 'active',
-        questions_data: JSON.stringify(questions)
-      });
-      hideLoading();
-
-      if (session) {
-        appState.studentName = studentName;
-        appState.studentId = studentId;
-        appState.studentClass = studentClass;
-        appState.examSessionId = session.id;
-        appState.examTitle = exam.title;
-        appState.examSubject = exam.subject;
-        appState.currentView = 'student';
-        appState.remainingSeconds = exam.duration * 60;
-        appState.answers.clear();
-        appState.currentQuestionIndex = 0;
-        appState.totalQuestions = questions.length;
-        appState.examQuestions = questions;
-        appState.currentExamToken = examToken;
-
-        showToast(`Selamat datang ${studentName}!`, 'success');
-        
-        const answers = await getSessionAnswers(session.id);
-        answers.forEach(ans => {
-          appState.answers.set(ans.question_number, {
-            answer: ans.answer,
-            isDoubtful: ans.is_doubtful
-          });
-        });
-
-        saveStateToLocalStorage();
-        startTimer();
-        renderStudentInterface();
-      }
-    }
-
-    function startTimer() {
-      if (appState.timerInterval) clearInterval(appState.timerInterval);
-      
-      appState.timerInterval = setInterval(async () => {
-        appState.remainingSeconds--;
-        
-        if (appState.remainingSeconds <= 0) {
-          clearInterval(appState.timerInterval);
-          showToast('Waktu habis! Ujian diselesaikan otomatis', 'warning');
-          await finishExam();
-        } else {
-          updateTimerDisplay();
-          saveStateToLocalStorage();
-          
-          if (appState.remainingSeconds % 30 === 0) {
-            const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
-            await updateStudentSession(appState.examSessionId, {
-              answered_count: answeredCount,
-              remaining_seconds: appState.remainingSeconds
-            });
-          }
-        }
-      }, 1000);
-    }
-
-    // Auto-check untuk session yang waktu habis di monitoring
-    async function autoFinishExpiredSessions() {
-      if (!isSupabaseConfigured) return;
-      
-      try {
-        const { data: activeSessions, error } = await supabase
-          .from('student_sessions')
-          .select('*')
-          .eq('status', 'active')
-          .lte('remaining_seconds', 0);
-        
-        if (error) throw error;
-        
-        if (activeSessions && activeSessions.length > 0) {
-          for (const session of activeSessions) {
-            await finishSession(session.id);
-          }
-        }
-      } catch (error) {
-        console.error('Error auto-finishing expired sessions:', error);
-      }
-    }
-
-    function updateTimerDisplay() {
-      const hours = Math.floor(appState.remainingSeconds / 3600);
-      const minutes = Math.floor((appState.remainingSeconds % 3600) / 60);
-      const seconds = appState.remainingSeconds % 60;
-      
-      const timerEl = document.getElementById('timer');
-      if (timerEl) {
-        timerEl.textContent = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        
-        if (appState.remainingSeconds <= 300) {
-          timerEl.classList.add('timer-warning');
-        }
-      }
-    }
-
-    async function selectAnswer(answer) {
-      const questionNumber = appState.currentQuestionIndex + 1;
-      
-      appState.answers.set(questionNumber, {
-        answer: answer,
-        isDoubtful: false
-      });
-
-      await saveAnswer({
-        session_id: appState.examSessionId,
-        question_number: questionNumber,
-        answer: answer,
-        is_doubtful: false
-      });
-
-      const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
-      await updateStudentSession(appState.examSessionId, {
-        answered_count: answeredCount
-      });
-
-      saveStateToLocalStorage();
-      renderQuestionContent();
-      renderQuestionNavigator();
-    }
-
-    async function togglePGKAnswer(option) {
-      const questionNumber = appState.currentQuestionIndex + 1;
-      const current = appState.answers.get(questionNumber);
-      
-      let selectedAnswers = [];
-      if (current && current.answer) {
-        selectedAnswers = current.answer.split(',').filter(a => a);
-      }
-      
-      const index = selectedAnswers.indexOf(option);
-      if (index > -1) {
-        selectedAnswers.splice(index, 1);
-      } else {
-        selectedAnswers.push(option);
-      }
-      
-      selectedAnswers.sort();
-      const answerString = selectedAnswers.join(',');
-      
-      appState.answers.set(questionNumber, {
-        answer: answerString,
-        isDoubtful: false
-      });
-
-      await saveAnswer({
-        session_id: appState.examSessionId,
-        question_number: questionNumber,
-        answer: answerString,
-        is_doubtful: false
-      });
-
-      const answeredCount = Array.from(appState.answers.values()).filter(a => a.answer).length;
-      await updateStudentSession(appState.examSessionId, {
-        answered_count: answeredCount
-      });
-
-      saveStateToLocalStorage();
-      renderQuestionContent();
-      renderQuestionNavigator();
-    }
-
-    async function markAsDoubtful() {
-      const questionNumber = appState.currentQuestionIndex + 1;
-      const current = appState.answers.get(questionNumber);
-      
-      if (current) {
-        current.isDoubtful = true;
-        appState.answers.set(questionNumber, current);
-        await saveAnswer({
-          session_id: appState.examSessionId,
-          question_number: questionNumber,
-          answer: current.answer,
-          is_doubtful: true
-        });
-      } else {
-        appState.answers.set(questionNumber, {
-          answer: '',
-          isDoubtful: true
-        });
-        await saveAnswer({
-          session_id: appState.examSessionId,
-          question_number: questionNumber,
-          answer: '',
-          is_doubtful: true
-        });
-      }
-
-      saveStateToLocalStorage();
-      renderQuestionNavigator();
-      showToast('Soal ditandai ragu-ragu', 'info');
-    }
-
-    function goToQuestion(index) {
-      appState.currentQuestionIndex = index;
-      renderQuestionContent();
-      renderQuestionNavigator();
-    }
-
-    function previousQuestion() {
-      if (appState.currentQuestionIndex > 0) {
-        appState.currentQuestionIndex--;
-        renderQuestionContent();
-        renderQuestionNavigator();
-      }
-    }
-
-    function nextQuestion() {
-      if (appState.currentQuestionIndex < appState.totalQuestions - 1) {
-        appState.currentQuestionIndex++;
-        renderQuestionContent();
-        renderQuestionNavigator();
-      }
-    }
-
-    function showFinishConfirmation() {
-      const answered = Array.from(appState.answers.values()).filter(a => a.answer).length;
-      const unanswered = appState.totalQuestions - answered;
-
-      const modal = document.createElement('div');
-      modal.className = 'fixed inset-0 bg-black bg-opacity-50 modal-backdrop flex items-center justify-center z-50 fade-in';
-      modal.innerHTML = `
-        <div class="bg-white rounded-lg p-8 max-w-md mx-4 shadow-2xl">
-          <h3 class="text-2xl font-bold text-gray-900 mb-4">Konfirmasi Selesai Ujian</h3>
-          <div class="mb-6 space-y-2">
-            <p class="text-gray-700">Soal dijawab: <span class="font-semibold text-green-600">${answered}</span></p>
-            <p class="text-gray-700">Belum dijawab: <span class="font-semibold text-red-600">${unanswered}</span></p>
-            ${unanswered > 0 ? '<p class="text-sm text-orange-600 mt-4">⚠️ Masih ada soal yang belum dijawab!</p>' : ''}
-          </div>
-          <p class="text-gray-600 mb-6">Apakah Anda yakin ingin menyelesaikan ujian?</p>
-          <div class="flex gap-3">
-            <button id="cancelFinish" class="flex-1 px-4 py-3 bg-gray-200 text-gray-800 rounded-lg font-medium hover:bg-gray-300 transition">
-              Batal
-            </button>
-            <button id="confirmFinish" class="flex-1 px-4 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition">
-              Ya, Selesai
-            </button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      document.getElementById('cancelFinish').onclick = () => {
-        document.body.removeChild(modal);
-      };
-
-      document.getElementById('confirmFinish').onclick = async () => {
-        document.body.removeChild(modal);
-        await finishExam();
-      };
-    }
-
-    async function finishExam() {
-      if (appState.timerInterval) {
-        clearInterval(appState.timerInterval);
-      }
-
-      // Hitung nilai
-      let correctCount = 0;
-      let totalPoints = 0;
-      let earnedPoints = 0;
-
-      appState.examQuestions.forEach((question, index) => {
-        const questionNumber = index + 1;
-        const studentAnswer = appState.answers.get(questionNumber);
-        
-        if (studentAnswer && studentAnswer.answer) {
-          totalPoints += question.points;
-          
-          if (question.type === 'pg') {
-            if (studentAnswer.answer === question.correct_answer) {
-              correctCount++;
-              earnedPoints += question.points;
-            }
-          } else if (question.type === 'pgk') {
-            const correctAnswers = question.correct_answers.split(',').sort().join(',');
-            const studentAnswers = studentAnswer.answer.split(',').sort().join(',');
-            
-            if (studentAnswers === correctAnswers) {
-              correctCount++;
-              earnedPoints += question.points;
-            }
-          }
-        } else {
-          totalPoints += question.points;
-        }
-      });
-
-      const score = totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 100) : 0;
-
-      await updateStudentSession(appState.examSessionId, {
-        status: 'finished',
-        finished_at: new Date().toISOString(),
-        score: score,
-        correct_count: correctCount,
-        total_points: totalPoints,
-        earned_points: earnedPoints
-      });
-      
-      clearStateFromLocalStorage();
-      showResultPage(appState.answers.size, appState.totalQuestions, score, correctCount);
-    }
-
-    function showResultPage(answered, total, score, correctCount) {
-      const app = document.getElementById('app');
-      
-      let gradeColor = 'text-red-600';
-      let gradeBg = 'bg-red-50';
-      let gradeText = 'Perlu Belajar Lebih Giat';
-      
-      if (score >= 90) {
-        gradeColor = 'text-green-600';
-        gradeBg = 'bg-green-50';
-        gradeText = 'Luar Biasa! 🏆';
-      } else if (score >= 80) {
-        gradeColor = 'text-blue-600';
-        gradeBg = 'bg-blue-50';
-        gradeText = 'Sangat Baik! 🌟';
-      } else if (score >= 70) {
-        gradeColor = 'text-yellow-600';
-        gradeBg = 'bg-yellow-50';
-        gradeText = 'Baik! 👍';
-      } else if (score >= 60) {
-        gradeColor = 'text-orange-600';
-        gradeBg = 'bg-orange-50';
-        gradeText = 'Cukup';
-      }
-      
-      app.innerHTML = `
-        <div class="min-h-full flex items-center justify-center p-8" style="background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);">
-          <div class="bg-white rounded-2xl shadow-2xl p-12 max-w-3xl w-full text-center fade-in">
-            <div class="mb-6">
-              <svg class="w-24 h-24 mx-auto text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-              </svg>
-            </div>
-            <h2 class="text-4xl font-bold mb-2 text-gray-900">Ujian Selesai!</h2>
-            <p class="text-xl text-gray-600 mb-2">Terima kasih ${appState.studentName}</p>
-            <p class="text-md text-gray-500 mb-8">${appState.examTitle}</p>
-            
-            <div class="${gradeBg} rounded-xl p-6 mb-6">
-              <p class="text-sm text-gray-600 mb-2">Nilai Akhir</p>
-              <p class="text-6xl font-bold ${gradeColor} mb-2">${score}</p>
-              <p class="text-lg font-semibold ${gradeColor}">${gradeText}</p>
-            </div>
-            
-            <div class="bg-gray-50 rounded-xl p-6 mb-8">
-              <div class="grid grid-cols-4 gap-4 mb-4">
-                <div class="text-center">
-                  <p class="text-gray-500 text-sm mb-1">Benar</p>
-                  <p class="text-3xl font-bold text-green-600">${correctCount}</p>
-                </div>
-                <div class="text-center">
-                  <p class="text-gray-500 text-sm mb-1">Salah</p>
-                  <p class="text-3xl font-bold text-red-600">${answered - correctCount}</p>
-                </div>
-                <div class="text-center">
-                  <p class="text-gray-500 text-sm mb-1">Tidak Dijawab</p>
-                  <p class="text-3xl font-bold text-gray-600">${total - answered}</p>
-                </div>
-                <div class="text-center">
-                  <p class="text-gray-500 text-sm mb-1">Total Soal</p>
-                  <p class="text-3xl font-bold text-blue-600">${total}</p>
-                </div>
-              </div>
-              <div class="mt-4">
-                <div class="w-full bg-gray-200 rounded-full h-4">
-                  <div class="bg-green-500 h-4 rounded-full progress-bar" style="width: ${score}%"></div>
-                </div>
-                <p class="text-sm text-gray-600 mt-2">Persentase Nilai: ${score}%</p>
-              </div>
-            </div>
-
-            <button onclick="backToRoleSelection()" class="px-8 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
-              Kembali ke Menu
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
     // ==================== RENDER FUNCTIONS ====================
     
     function renderStudentInterface() {
@@ -2600,6 +3065,9 @@
               <div>
                 <h1 class="text-2xl font-bold text-gray-900">${appState.examTitle}</h1>
                 <p class="text-sm text-gray-600">${appState.studentName} - ${appState.studentClass}</p>
+                ${appState.currentExam && !appState.currentExam.is_open_book ? 
+                  '<p class="text-xs text-red-600 font-semibold mt-1">🔒 Closed Book - Jangan pindah tab!</p>' : 
+                  '<p class="text-xs text-blue-600 font-semibold mt-1">📖 Open Book</p>'}
               </div>
               <div class="flex items-center gap-4">
                 <div class="text-center">
@@ -2614,10 +3082,12 @@
           </nav>
 
           <div class="flex-1 max-w-7xl w-full mx-auto p-8 flex gap-6">
+            <!-- Main Question Area -->
             <div class="flex-1 bg-white rounded-xl shadow-xl p-8">
               <div id="questionContent"></div>
             </div>
 
+            <!-- Question Navigator Sidebar -->
             <div class="w-80 bg-white rounded-xl shadow-xl p-6">
               <h3 class="text-lg font-bold text-gray-900 mb-4">Navigasi Soal</h3>
               <div id="questionNavigator" class="grid grid-cols-5 gap-2 mb-6"></div>
@@ -2636,6 +3106,13 @@
                   <span>Belum Dijawab</span>
                 </div>
               </div>
+              
+              ${appState.currentExam && !appState.currentExam.is_open_book ? `
+                <div class="mt-6 p-4 bg-red-50 rounded-lg border-2 border-red-200">
+                  <p class="text-xs text-red-800 font-semibold mb-1">⚠️ Pelanggaran: ${appState.violationCount}/3</p>
+                  <p class="text-xs text-red-600">Ujian akan diselesaikan otomatis jika 3 kali pindah tab!</p>
+                </div>
+              ` : ''}
             </div>
           </div>
         </div>
@@ -2765,7 +3242,7 @@
             <div class="text-center mb-12">
               <h1 class="text-5xl font-bold text-gray-900 mb-2">CBT Professional System</h1>
               <p class="text-xl text-gray-600">Sistem Computer Based Test Profesional</p>
-              ${isSupabaseConfigured ? '<p class="text-sm text-green-600 mt-2">✅ Terhubung ke Database</p>' : '<p class="text-sm text-red-600 mt-2">❌ Koneksi Supabase Gagal</p>'}
+              ${isSupabaseConfigured ? '<p class="text-sm text-green-600 mt-2">✅ Terhubung ke Supabase</p>' : '<p class="text-sm text-red-600 mt-2">❌ Koneksi Supabase Gagal</p>'}
             </div>
 
             <div class="grid md:grid-cols-2 gap-6">
@@ -2881,37 +3358,27 @@
             
             <form onsubmit="handleStudentLogin(event)" class="space-y-6">
               <div>
-                <label for="studentName" class="block text-sm font-medium text-gray-700 mb-2">Nama Lengkap</label>
-                <input type="text" id="studentName" required placeholder="Masukkan nama Anda"
+                <label for="studentUserId" class="block text-sm font-medium text-gray-700 mb-2">NISN / NIS</label>
+                <input type="text" id="studentUserId" required placeholder="Masukkan NISN/NIS"
                        class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
               </div>
 
               <div>
-                <label for="studentId" class="block text-sm font-medium text-gray-700 mb-2">NISN / NIS</label>
-                <input type="text" id="studentId" required placeholder="Masukkan NISN/NIS"
+                <label for="studentPassword" class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                <input type="password" id="studentPassword" required placeholder="Masukkan password"
                        class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-              </div>
-
-              <div>
-                <label for="studentClass" class="block text-sm font-medium text-gray-700 mb-2">Jurusan</label>
-                <input type="text" id="studentClass" required placeholder="Contoh: X - TAV"
-                       class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-              </div>
-
-              <div>
-                <label for="examToken" class="block text-sm font-medium text-gray-700 mb-2">Token Ujian</label>
-                <input type="text" id="examToken" required placeholder="Masukkan token ujian dari guru"
-                       class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500 uppercase">
               </div>
 
               <button type="submit" class="w-full px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
-                Mulai Ujian
+                Login
               </button>
             </form>
           </div>
         </div>
       `;
     }
+
+    let monitoringInterval = null;
 
     async function refreshMonitoring() {
       clearSessionsCache();
@@ -2927,10 +3394,15 @@
         clearInterval(monitoringInterval);
         monitoringInterval = null;
       }
+      
+      removeBrowserLock();
       clearStateFromLocalStorage();
       clearAdminStateFromLocalStorage();
+      clearLoggedUser();
+      
       appState.currentView = 'role-selection';
       appState.currentRole = null;
+      appState.loggedUser = null;
       appState.studentId = null;
       appState.studentName = '';
       appState.studentClass = '';
@@ -2938,6 +3410,7 @@
       appState.currentQuestionIndex = 0;
       appState.answers.clear();
       appState.examQuestions = [];
+      appState.violationCount = 0;
       renderRoleSelection();
     }
 
@@ -2958,7 +3431,7 @@
           <div class="max-w-7xl mx-auto p-8">
             <div class="bg-blue-50 rounded-lg p-4 mb-6">
               <p class="text-sm text-blue-800">
-                <strong>📌 Info Sistem:</strong> Sistem dioptimalkan untuk 200 siswa dengan caching otomatis. Data akan di-refresh setiap 5 menit untuk performa terbaik.
+                <strong>🎯 Info Sistem:</strong> Sistem dioptimalkan untuk 200 siswa dengan caching otomatis. Data akan di-refresh setiap 5 menit untuk performa terbaik.
               </p>
             </div>
             
@@ -3008,113 +3481,83 @@
       `;
     }
 
-    async function renderUserManagement() {
-      appState.currentView = 'user-management';
+    async function renderSubjectManagement() {
+      appState.currentView = 'subject-management';
       saveAdminStateToLocalStorage();
       
       showLoading();
-      const users = await getUsers(true);
+      const subjects = await getSubjects();
       hideLoading();
 
       const app = document.getElementById('app');
       
       app.innerHTML = `
-        <div class="min-h-full" style="background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);">
+        <div class="min-h-full" style="background: linear-gradient(135deg, #9333ea 0%, #7e22ce 100%);">
           <nav class="bg-white shadow-lg">
             <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-gray-900">👥 Manajemen User</h1>
+              <h1 class="text-2xl font-bold text-gray-900">Manajemen Mata Pelajaran</h1>
               <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                Kembali
+                ← Kembali
               </button>
             </div>
           </nav>
 
           <div class="max-w-7xl mx-auto p-8">
-            <div class="bg-white rounded-xl shadow-xl p-8 mb-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Tambah User</h3>
-              
-              <form id="userForm" onsubmit="handleAddUser(event)" class="space-y-4">
-                <div class="grid md:grid-cols-3 gap-4">
+            <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+              <h3 class="text-xl font-bold text-gray-900 mb-4">➕ Tambah Mata Pelajaran</h3>
+              <form id="subjectForm" onsubmit="handleAddSubject(event)" class="space-y-4">
+                <div class="grid md:grid-cols-2 gap-4">
                   <div>
-                    <label for="userId" class="block text-sm font-medium text-gray-700 mb-2">NISN/ID *</label>
-                    <input type="text" id="userId" required placeholder="Masukkan NISN/ID"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                    <label for="subjectCode" class="block text-sm font-medium text-gray-700 mb-2">Kode Mapel *</label>
+                    <input type="text" id="subjectCode" required placeholder="Contoh: MTK"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500">
                   </div>
-
                   <div>
-                    <label for="userName" class="block text-sm font-medium text-gray-700 mb-2">Nama Lengkap *</label>
-                    <input type="text" id="userName" required placeholder="Masukkan nama lengkap"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-                  </div>
-
-                  <div>
-                    <label for="userRole" class="block text-sm font-medium text-gray-700 mb-2">Role *</label>
-                    <select id="userRole" class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
-                      <option value="student">Student</option>
-                      <option value="teacher">Teacher</option>
-                      <option value="admin">Admin</option>
-                    </select>
+                    <label for="subjectName" class="block text-sm font-medium text-gray-700 mb-2">Nama Mapel *</label>
+                    <input type="text" id="subjectName" required placeholder="Contoh: Matematika"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500">
                   </div>
                 </div>
-
                 <div>
-                  <label for="userPassword" class="block text-sm font-medium text-gray-700 mb-2">Password *</label>
-                  <input type="password" id="userPassword" required placeholder="Masukkan password"
-                         class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                  <label for="subjectDescription" class="block text-sm font-medium text-gray-700 mb-2">Deskripsi</label>
+                  <textarea id="subjectDescription" rows="3" placeholder="Keterangan tambahan (opsional)"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500"></textarea>
                 </div>
-
-                <button type="submit" class="w-full px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
-                  ➕ Tambah User
+                <button type="submit" class="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition">
+                  💾 Simpan Mata Pelajaran
                 </button>
               </form>
             </div>
 
             <div class="bg-white rounded-xl shadow-xl p-8">
-              <div class="flex justify-between items-center mb-6">
-                <h3 class="text-2xl font-bold text-gray-900">Daftar User (${users.length})</h3>
-                <div class="flex gap-3">
-                  <button onclick="downloadUserTemplate()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
-                    📥 Download Template
-                  </button>
-                  <label class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition cursor-pointer">
-                    📤 Import Excel
-                    <input type="file" accept=".xlsx,.xls" onchange="handleExcelUpload(event)" class="hidden">
-                  </label>
-                </div>
-              </div>
-              
-              ${users.length === 0 ? `
+              <h3 class="text-xl font-bold text-gray-900 mb-4">📚 Daftar Mata Pelajaran (${subjects.length})</h3>
+              ${subjects.length === 0 ? `
                 <div class="text-center py-12">
-                  <p class="text-gray-500 text-lg">Belum ada user</p>
+                  <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                  </svg>
+                  <p class="text-gray-500">Belum ada mata pelajaran</p>
                 </div>
               ` : `
                 <div class="overflow-x-auto">
                   <table class="w-full">
-                    <thead class="bg-gray-50">
+                    <thead class="bg-purple-50">
                       <tr>
-                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">NISN/ID</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Kode</th>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Nama</th>
-                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Role</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Deskripsi</th>
                         <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Aksi</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200">
-                      ${users.map(user => `
+                      ${subjects.map(subject => `
                         <tr class="hover:bg-gray-50">
-                          <td class="px-6 py-4 font-semibold text-blue-600">${user.user_id}</td>
-                          <td class="px-6 py-4 text-gray-900">${user.name}</td>
-                          <td class="px-6 py-4">
-                            <span class="px-3 py-1 rounded-full text-xs font-semibold ${
-                              user.role === 'admin' ? 'bg-red-100 text-red-800' :
-                              user.role === 'teacher' ? 'bg-blue-100 text-blue-800' :
-                              'bg-green-100 text-green-800'
-                            }">
-                              ${user.role.toUpperCase()}
-                            </span>
-                          </td>
+                          <td class="px-6 py-4 font-mono font-bold text-purple-600">${subject.code}</td>
+                          <td class="px-6 py-4 text-gray-900">${subject.name}</td>
+                          <td class="px-6 py-4 text-gray-600">${subject.description || '-'}</td>
                           <td class="px-6 py-4 text-center">
-                            <button onclick="handleDeleteUser('${user.id}')" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm">
-                              Hapus
+                            <button onclick="handleDeleteSubject('${subject.id}')" class="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition text-sm">
+                              🗑️ Hapus
                             </button>
                           </td>
                         </tr>
@@ -3127,6 +3570,161 @@
           </div>
         </div>
       `;
+    }
+
+    async function renderUserManagement() {
+      appState.currentView = 'user-management';
+      saveAdminStateToLocalStorage();
+      
+      showLoading();
+      const users = await getUsers();
+      hideLoading();
+
+      const app = document.getElementById('app');
+      
+      app.innerHTML = `
+        <div class="min-h-full" style="background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);">
+          <nav class="bg-white shadow-lg">
+            <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+              <h1 class="text-2xl font-bold text-gray-900">Manajemen User</h1>
+              <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
+                ← Kembali
+              </button>
+            </div>
+          </nav>
+
+          <div class="max-w-7xl mx-auto p-8">
+            <div class="grid md:grid-cols-2 gap-6 mb-6">
+              <div class="bg-white rounded-xl shadow-xl p-8">
+                <h3 class="text-xl font-bold text-gray-900 mb-4">➕ Tambah User</h3>
+                <form id="userForm" onsubmit="handleAddUser(event)" class="space-y-4">
+                  <div>
+                    <label for="userId" class="block text-sm font-medium text-gray-700 mb-2">NISN / User ID *</label>
+                    <input type="text" id="userId" required placeholder="Contoh: 1234567890"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                  </div>
+                  <div>
+                    <label for="userName" class="block text-sm font-medium text-gray-700 mb-2">Nama Lengkap *</label>
+                    <input type="text" id="userName" required placeholder="Contoh: Ahmad Fauzi"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                  </div>
+                  <div>
+                    <label for="userRole" class="block text-sm font-medium text-gray-700 mb-2">Role *</label>
+                    <select id="userRole" onchange="toggleClassField()" class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                      <option value="student">Siswa</option>
+                      <option value="teacher">Guru</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div id="classFieldContainer">
+                    <label for="userClass" class="block text-sm font-medium text-gray-700 mb-2">Kelas *</label>
+                    <input type="text" id="userClass" placeholder="Contoh: X-TAV"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                  </div>
+                  <div>
+                    <label for="userPassword" class="block text-sm font-medium text-gray-700 mb-2">Password *</label>
+                    <input type="password" id="userPassword" required placeholder="Password default"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500">
+                  </div>
+                  <button type="submit" class="w-full px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
+                    💾 Simpan User
+                  </button>
+                </form>
+              </div>
+
+              <div class="bg-white rounded-xl shadow-xl p-8">
+                <h3 class="text-xl font-bold text-gray-900 mb-4">📤 Import dari Excel</h3>
+                <div class="space-y-4">
+                  <p class="text-sm text-gray-600">Import user secara massal menggunakan file Excel (.xlsx)</p>
+                  
+                  <button onclick="downloadUserTemplate()" class="w-full px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
+                    📥 Download Template Excel
+                  </button>
+                  
+                  <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                    <label for="excelUpload" class="cursor-pointer">
+                      <svg class="w-12 h-12 mx-auto text-gray-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                      </svg>
+                      <p class="text-sm text-gray-600 mb-2">Klik untuk upload Excel</p>
+                      <p class="text-xs text-gray-500">Format: .xlsx atau .xls</p>
+                      <input type="file" id="excelUpload" accept=".xlsx,.xls" onchange="handleExcelUpload(event)" class="hidden">
+                    </label>
+                  </div>
+
+                  <div class="bg-yellow-50 rounded-lg p-4">
+                    <p class="text-xs text-yellow-800">
+                      <strong>💡 Tips:</strong> Gunakan template Excel untuk import massal hingga ratusan user sekaligus!
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-xl p-8">
+              <h3 class="text-xl font-bold text-gray-900 mb-4">👥 Daftar User (${users.length})</h3>
+              ${users.length === 0 ? `
+                <div class="text-center py-12">
+                  <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>
+                  </svg>
+                  <p class="text-gray-500">Belum ada user terdaftar</p>
+                </div>
+              ` : `
+                <div class="overflow-x-auto">
+                  <table class="w-full">
+                    <thead class="bg-blue-50">
+                      <tr>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">User ID</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Nama</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Kelas</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Role</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200">
+                      ${users.map(user => `
+                        <tr class="hover:bg-gray-50">
+                          <td class="px-6 py-4 font-mono text-blue-600">${user.user_id}</td>
+                          <td class="px-6 py-4 text-gray-900">${user.name}</td>
+                          <td class="px-6 py-4 text-gray-600">${user.class || '-'}</td>
+                          <td class="px-6 py-4">
+                            <span class="px-2 py-1 rounded text-xs font-semibold ${
+                              user.role === 'admin' ? 'bg-red-100 text-red-800' :
+                              user.role === 'teacher' ? 'bg-green-100 text-green-800' :
+                              'bg-blue-100 text-blue-800'
+                            }">
+                              ${user.role}
+                            </span>
+                          </td>
+                          <td class="px-6 py-4 text-center">
+                            <button onclick="handleDeleteUser('${user.id}')" class="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition text-sm">
+                              🗑️ Hapus
+                            </button>
+                          </td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function toggleClassField() {
+      const role = document.getElementById('userRole').value;
+      const classField = document.getElementById('classFieldContainer');
+      
+      if (role === 'student') {
+        classField.style.display = 'block';
+        document.getElementById('userClass').required = true;
+      } else {
+        classField.style.display = 'none';
+        document.getElementById('userClass').required = false;
+      }
     }
 
     async function renderBankSoal() {
@@ -3140,48 +3738,70 @@
 
       const app = document.getElementById('app');
       
-      const allQuestions = await getQuestions('all');
-      const questionCounts = subjects.map(s => ({
-        code: s.code,
-        count: allQuestions.filter(q => q.subject === s.code).length
-      }));
-
+      const allQuestions = appState.currentSubjectFilter === 'all' ? await getQuestions('all') : questions;
+      
       app.innerHTML = `
-        <div class="min-h-full" style="background: linear-gradient(135deg, #10b981 0%, #34d399 100%);">
+        <div class="min-h-full" style="background: linear-gradient(135deg, #059669 0%, #047857 100%);">
           <nav class="bg-white shadow-lg">
             <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-gray-900">📚 Bank Soal</h1>
+              <h1 class="text-2xl font-bold text-gray-900">Bank Soal</h1>
               <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                Kembali
+                ← Kembali
               </button>
             </div>
           </nav>
 
           <div class="max-w-7xl mx-auto p-8">
-            <div class="bg-white rounded-xl shadow-xl p-8 mb-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Tambah Soal</h3>
-              
+            <!-- Bulk Actions Bar -->
+            <div class="bg-white rounded-xl shadow-xl p-6 mb-6">
+              <div class="flex flex-wrap gap-4 items-center justify-between">
+                <div class="flex gap-2">
+                  <button onclick="toggleBulkEditMode()" class="px-4 py-2 ${appState.bulkEditMode ? 'bg-orange-600' : 'bg-blue-600'} text-white rounded-lg font-semibold hover:opacity-90 transition">
+                    ${appState.bulkEditMode ? '❌ Batal Edit Massal' : '✏️ Edit Massal'}
+                  </button>
+                  ${appState.bulkEditMode ? `
+                    <button onclick="selectAllQuestions()" class="px-4 py-2 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition">
+                      ${appState.selectedQuestions.size === questions.length ? '☐ Batalkan Semua' : '☑️ Pilih Semua'}
+                    </button>
+                    <button onclick="showBulkEditModal()" class="px-4 py-2 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition ${appState.selectedQuestions.size === 0 ? 'opacity-50 cursor-not-allowed' : ''}">
+                      💾 Terapkan (${appState.selectedQuestions.size})
+                    </button>
+                  ` : ''}
+                </div>
+                
+                <div class="flex gap-2">
+                  <button onclick="downloadWordTemplate()" class="px-4 py-2 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
+                    📥 Template Excel
+                  </button>
+                  <button onclick="showImportExcelModal()" class="px-4 py-2 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition">
+                    📤 Import Excel
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Add Question Form -->
+            <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+              <h3 class="text-xl font-bold text-gray-900 mb-4">➕ Tambah Soal Baru</h3>
               <form id="questionForm" onsubmit="handleAddQuestion(event)" class="space-y-4">
                 <div class="grid md:grid-cols-3 gap-4">
                   <div>
                     <label for="questionType" class="block text-sm font-medium text-gray-700 mb-2">Tipe Soal *</label>
-                    <select id="questionType" onchange="toggleAnswerType()" class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                    <select id="questionType" onchange="toggleAnswerType()" class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
                       <option value="pg">Pilihan Ganda (PG)</option>
                       <option value="pgk">PG Kompleks (PGK)</option>
                     </select>
                   </div>
-
                   <div>
                     <label for="questionSubject" class="block text-sm font-medium text-gray-700 mb-2">Mata Pelajaran *</label>
-                    <select id="questionSubject" required class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-                      <option value="">-- Pilih Mata Pelajaran --</option>
+                    <select id="questionSubject" required class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                      <option value="">-- Pilih Mapel --</option>
                       ${subjects.map(s => `<option value="${s.code}">${s.code} - ${s.name}</option>`).join('')}
                     </select>
                   </div>
-
                   <div>
-                    <label for="difficulty" class="block text-sm font-medium text-gray-700 mb-2">Kesulitan *</label>
-                    <select id="difficulty" class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                    <label for="difficulty" class="block text-sm font-medium text-gray-700 mb-2">Tingkat Kesulitan *</label>
+                    <select id="difficulty" class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
                       <option value="easy">Mudah</option>
                       <option value="medium">Sedang</option>
                       <option value="hard">Sulit</option>
@@ -3191,23 +3811,47 @@
 
                 <div>
                   <label for="questionText" class="block text-sm font-medium text-gray-700 mb-2">Pertanyaan *</label>
-                  <textarea id="questionText" required rows="3" placeholder="Masukkan pertanyaan..."
-                            class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500"></textarea>
+                  <textarea id="questionText" required rows="3" placeholder="Tulis pertanyaan di sini..."
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500"></textarea>
                 </div>
 
                 <div class="grid md:grid-cols-2 gap-4">
-                  ${['A', 'B', 'C', 'D', 'E'].map(opt => `
-                    <div>
-                      <label for="option${opt}" class="block text-sm font-medium text-gray-700 mb-2">Pilihan ${opt} *</label>
-                      <input type="text" id="option${opt}" required placeholder="Masukkan pilihan ${opt}"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-                    </div>
-                  `).join('')}
+                  <div>
+                    <label for="optionA" class="block text-sm font-medium text-gray-700 mb-2">Pilihan A *</label>
+                    <input type="text" id="optionA" required placeholder="Jawaban A"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label for="optionB" class="block text-sm font-medium text-gray-700 mb-2">Pilihan B *</label>
+                    <input type="text" id="optionB" required placeholder="Jawaban B"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label for="optionC" class="block text-sm font-medium text-gray-700 mb-2">Pilihan C *</label>
+                    <input type="text" id="optionC" required placeholder="Jawaban C"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label for="optionD" class="block text-sm font-medium text-gray-700 mb-2">Pilihan D *</label>
+                    <input type="text" id="optionD" required placeholder="Jawaban D"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label for="optionE" class="block text-sm font-medium text-gray-700 mb-2">Pilihan E *</label>
+                    <input type="text" id="optionE" required placeholder="Jawaban E"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
+                  <div>
+                    <label for="points" class="block text-sm font-medium text-gray-700 mb-2">Poin Soal *</label>
+                    <input type="number" id="points" required min="0" value="1"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  </div>
                 </div>
 
+                <!-- PG Answer -->
                 <div id="pgAnswerSection">
-                  <label for="correctAnswer" class="block text-sm font-medium text-gray-700 mb-2">Jawaban Benar (PG) *</label>
-                  <select id="correctAnswer" class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
+                  <label for="correctAnswer" class="block text-sm font-medium text-gray-700 mb-2">Jawaban Benar *</label>
+                  <select id="correctAnswer" class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
                     <option value="A">A</option>
                     <option value="B">B</option>
                     <option value="C">C</option>
@@ -3216,116 +3860,124 @@
                   </select>
                 </div>
 
+                <!-- PGK Answers -->
                 <div id="pgkAnswerSection" style="display: none;">
-                  <label class="block text-sm font-medium text-gray-700 mb-2">Jawaban Benar (PGK) - Pilih minimal 1 *</label>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">Pilih Jawaban Benar (bisa lebih dari 1) *</label>
                   <div class="flex gap-4">
-                    ${['A', 'B', 'C', 'D', 'E'].map(opt => `
-                      <label class="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" id="ans${opt}" value="${opt}" class="w-5 h-5">
-                        <span class="font-medium">${opt}</span>
-                      </label>
-                    `).join('')}
+                    <label class="flex items-center gap-2">
+                      <input type="checkbox" id="ansA" value="A" class="w-5 h-5">
+                      <span>A</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="checkbox" id="ansB" value="B" class="w-5 h-5">
+                      <span>B</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="checkbox" id="ansC" value="C" class="w-5 h-5">
+                      <span>C</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="checkbox" id="ansD" value="D" class="w-5 h-5">
+                      <span>D</span>
+                    </label>
+                    <label class="flex items-center gap-2">
+                      <input type="checkbox" id="ansE" value="E" class="w-5 h-5">
+                      <span>E</span>
+                    </label>
                   </div>
                 </div>
 
-                <div>
-                  <label for="points" class="block text-sm font-medium text-gray-700 mb-2">Poin Soal *</label>
-                  <input type="number" id="points" required value="1" min="0"
-                         class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-green-500">
-                </div>
-
-                <button type="submit" class="w-full px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
-                  ➕ Tambah Soal
+                <button type="submit" class="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition">
+                  💾 Simpan Soal
                 </button>
               </form>
             </div>
 
-            <div class="bg-white rounded-xl shadow-xl p-8">
-              <div class="flex justify-between items-center mb-6">
-                <h3 class="text-2xl font-bold text-gray-900">Daftar Soal (${questions.length})</h3>
-                <div class="flex gap-3">
-                  ${appState.bulkEditMode ? `
-                    <button onclick="selectAllQuestions()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                      ${appState.selectedQuestions.size === questions.length ? '❌ Batal Pilih Semua' : '☑️ Pilih Semua'}
-                    </button>
-                    <button onclick="showBulkEditModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
-                      ✏️ Edit (${appState.selectedQuestions.size})
-                    </button>
-                    <button onclick="toggleBulkEditMode()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">
-                      Batal
-                    </button>
-                  ` : `
-                    <button onclick="toggleBulkEditMode()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
-                      ✏️ Edit Massal
-                    </button>
-                  `}
-                  <button onclick="downloadWordTemplate()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
-                    📥 Template Excel
-                  </button>
-                  <button onclick="showImportExcelModal()" class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
-                    📤 Import Excel
-                  </button>
-                </div>
-              </div>
-
-              <div class="flex gap-2 mb-6 flex-wrap">
-                <button onclick="filterBySubject('all')" class="px-4 py-2 ${appState.currentSubjectFilter === 'all' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-800'} rounded-lg hover:bg-green-500 hover:text-white transition">
+            <!-- Filter -->
+            <div class="bg-white rounded-xl shadow-xl p-6 mb-6">
+              <div class="flex flex-wrap gap-2">
+                <button onclick="filterBySubject('all')" class="px-4 py-2 ${appState.currentSubjectFilter === 'all' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700'} rounded-lg font-medium hover:opacity-90 transition">
                   Semua (${allQuestions.length})
                 </button>
-                ${questionCounts.map(qc => `
-                  <button onclick="filterBySubject('${qc.code}')" class="px-4 py-2 ${appState.currentSubjectFilter === qc.code ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-800'} rounded-lg hover:bg-green-500 hover:text-white transition">
-                    ${qc.code} (${qc.count})
+                ${subjects.map(s => `
+                  <button onclick="filterBySubject('${s.code}')" class="px-4 py-2 ${appState.currentSubjectFilter === s.code ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700'} rounded-lg font-medium hover:opacity-90 transition">
+                    ${s.code}
                   </button>
                 `).join('')}
               </div>
-              
+            </div>
+
+            <!-- Questions List -->
+            <div class="bg-white rounded-xl shadow-xl p-8">
+              <h3 class="text-xl font-bold text-gray-900 mb-4">
+                📝 Daftar Soal ${appState.currentSubjectFilter === 'all' ? '' : `- ${appState.currentSubjectFilter}`} (${questions.length})
+              </h3>
               ${questions.length === 0 ? `
                 <div class="text-center py-12">
-                  <p class="text-gray-500 text-lg">Belum ada soal ${appState.currentSubjectFilter !== 'all' ? 'untuk mata pelajaran ' + appState.currentSubjectFilter : ''}</p>
+                  <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                  </svg>
+                  <p class="text-gray-500">Belum ada soal tersedia</p>
                 </div>
               ` : `
                 <div class="space-y-4">
-                  ${questions.map((q, index) => {
-                    const isSelected = appState.selectedQuestions.has(q.id);
-                    return `
-                      <div class="border-2 rounded-lg p-6 hover:shadow-lg transition ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}">
-                        <div class="flex items-start gap-4">
-                          ${appState.bulkEditMode ? `
-                            <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleQuestionSelection('${q.id}')" class="w-5 h-5 mt-1">
-                          ` : ''}
-                          <div class="flex-1">
-                            <div class="flex items-center gap-3 mb-3">
-                              <span class="px-3 py-1 bg-gray-200 text-gray-800 rounded-full text-xs font-bold">#${index + 1}</span>
-                              <span class="px-3 py-1 ${q.type === 'pg' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'} rounded-full text-xs font-bold">${q.type.toUpperCase()}</span>
-                              <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-xs font-bold">${q.subject}</span>
-                              <span class="difficulty-${q.difficulty}">${q.difficulty === 'easy' ? 'MUDAH' : q.difficulty === 'medium' ? 'SEDANG' : 'SULIT'}</span>
-                              <span class="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-xs font-bold">${q.points} POIN</span>
+                  ${questions.map((q, idx) => `
+                    <div class="border-2 ${appState.selectedQuestions.has(q.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200'} rounded-lg p-6 hover:shadow-md transition">
+                      <div class="flex items-start gap-4">
+                        ${appState.bulkEditMode ? `
+                          <input type="checkbox" 
+                                 ${appState.selectedQuestions.has(q.id) ? 'checked' : ''}
+                                 onchange="toggleQuestionSelection('${q.id}')"
+                                 class="w-6 h-6 mt-1">
+                        ` : ''}
+                        <div class="flex-1">
+                          <div class="flex items-center gap-2 mb-2">
+                            <span class="font-bold text-gray-900">#{idx + 1}</span>
+                            <span class="${q.type === 'pg' ? 'difficulty-easy' : 'difficulty-medium'}">${q.type.toUpperCase()}</span>
+                            <span class="difficulty-${q.difficulty}">${
+                              q.difficulty === 'easy' ? 'MUDAH' :
+                              q.difficulty === 'medium' ? 'SEDANG' : 'SULIT'
+                            }</span>
+                            <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-semibold">${q.subject}</span>
+                            <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-xs font-semibold">${q.points} poin</span>
+                          </div>
+                          <p class="text-gray-900 mb-3 font-medium">${q.question_text}</p>
+                          <div class="grid md:grid-cols-2 gap-2 text-sm">
+                            <div class="flex items-start gap-2">
+                              <span class="font-semibold text-gray-700">A.</span>
+                              <span class="text-gray-600">${q.option_a}</span>
                             </div>
-                            <p class="text-gray-900 font-medium mb-3">${q.question_text}</p>
-                            <div class="grid md:grid-cols-2 gap-2 text-sm">
-                              ${['A', 'B', 'C', 'D', 'E'].map(opt => {
-                                const isCorrectPG = q.type === 'pg' && q.correct_answer === opt;
-                                const isCorrectPGK = q.type === 'pgk' && q.correct_answers && q.correct_answers.split(',').includes(opt);
-                                const isCorrect = isCorrectPG || isCorrectPGK;
-                                return `
-                                  <div class="flex items-center gap-2 ${isCorrect ? 'text-green-600 font-semibold' : 'text-gray-600'}">
-                                    <span class="font-bold">${opt}.</span>
-                                    <span>${q['option_' + opt.toLowerCase()]}</span>
-                                    ${isCorrect ? '<span>✓</span>' : ''}
-                                  </div>
-                                `;
-                              }).join('')}
+                            <div class="flex items-start gap-2">
+                              <span class="font-semibold text-gray-700">B.</span>
+                              <span class="text-gray-600">${q.option_b}</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                              <span class="font-semibold text-gray-700">C.</span>
+                              <span class="text-gray-600">${q.option_c}</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                              <span class="font-semibold text-gray-700">D.</span>
+                              <span class="text-gray-600">${q.option_d}</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                              <span class="font-semibold text-gray-700">E.</span>
+                              <span class="text-gray-600">${q.option_e}</span>
                             </div>
                           </div>
-                          ${!appState.bulkEditMode ? `
-                            <button onclick="handleDeleteQuestion('${q.id}')" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm shrink-0">
-                              Hapus
-                            </button>
-                          ` : ''}
+                          <div class="mt-3 p-3 bg-green-50 rounded">
+                            <span class="text-sm font-semibold text-green-800">
+                              ✓ Jawaban: ${q.type === 'pg' ? q.correct_answer : q.correct_answers}
+                            </span>
+                          </div>
                         </div>
+                        ${!appState.bulkEditMode ? `
+                          <button onclick="handleDeleteQuestion('${q.id}')" class="px-3 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition text-sm">
+                            🗑️
+                          </button>
+                        ` : ''}
                       </div>
-                    `;
-                  }).join('')}
+                    </div>
+                  `).join('')}
                 </div>
               `}
             </div>
@@ -3339,102 +3991,110 @@
       saveAdminStateToLocalStorage();
       
       showLoading();
-      const exams = await getExams(true);
       const subjects = await getSubjects();
+      const exams = await getExams();
       hideLoading();
 
       const app = document.getElementById('app');
       
       app.innerHTML = `
-        <div class="min-h-full" style="background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);">
+        <div class="min-h-full" style="background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);">
           <nav class="bg-white shadow-lg">
             <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-gray-900">🎫 Generate Token Ujian</h1>
+              <h1 class="text-2xl font-bold text-gray-900">Generate Token Ujian</h1>
               <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                Kembali
+                ← Kembali
               </button>
             </div>
           </nav>
 
           <div class="max-w-7xl mx-auto p-8">
-            <div class="bg-white rounded-xl shadow-xl p-8 mb-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Buat Token Ujian Baru</h3>
-              
+            <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+              <h3 class="text-xl font-bold text-gray-900 mb-4">🎫 Buat Token Ujian Baru</h3>
               <form id="examForm" onsubmit="handleGenerateExam(event)" class="space-y-4">
                 <div class="grid md:grid-cols-2 gap-4">
                   <div>
                     <label for="examTitle" class="block text-sm font-medium text-gray-700 mb-2">Judul Ujian *</label>
-                    <input type="text" id="examTitle" required placeholder="Contoh: Ujian Tengah Semester"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                    <input type="text" id="examTitle" required placeholder="Contoh: UTS Matematika Semester 1"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                   </div>
-
                   <div>
                     <label for="examSubject" class="block text-sm font-medium text-gray-700 mb-2">Mata Pelajaran *</label>
-                    <select id="examSubject" required class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                    <select id="examSubject" required class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                       <option value="">-- Pilih Mata Pelajaran --</option>
                       ${subjects.map(s => `<option value="${s.code}">${s.code} - ${s.name}</option>`).join('')}
                     </select>
                   </div>
-                </div>
-
-                <div class="grid md:grid-cols-2 gap-4">
                   <div>
-                    <label for="examDuration" class="block text-sm font-medium text-gray-700 mb-2">Durasi (Menit) *</label>
-                    <input type="number" id="examDuration" required value="90" min="1"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                    <label for="examDuration" class="block text-sm font-medium text-gray-700 mb-2">Durasi (menit) *</label>
+                    <input type="number" id="examDuration" required min="1" value="90"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                   </div>
-
                   <div>
-                    <label for="totalQuestions" class="block text-sm font-medium text-gray-700 mb-2">Total Soal *</label>
-                    <input type="number" id="totalQuestions" required value="50" min="1"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                    <label for="totalQuestions" class="block text-sm font-medium text-gray-700 mb-2">Jumlah Soal *</label>
+                    <input type="number" id="totalQuestions" required min="1" value="50"
+                           class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                   </div>
                 </div>
 
                 <div class="bg-blue-50 rounded-lg p-6">
-                  <h4 class="font-bold text-gray-900 mb-4">Bobot Tipe Soal</h4>
-                  <div class="grid md:grid-cols-2 gap-4">
+                  <h4 class="font-bold text-gray-900 mb-3">⚙️ Pengaturan Tipe Soal</h4>
+                  <div class="grid md:grid-cols-2 gap-4 mb-3">
                     <div>
                       <label for="pgPercent" class="block text-sm font-medium text-gray-700 mb-2">PG (%)</label>
-                      <input type="number" id="pgPercent" value="70" min="0" max="100" oninput="updateTotalTypePercent()"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                      <input type="number" id="pgPercent" min="0" max="100" value="70" oninput="updateTotalTypePercent()"
+                             class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                     </div>
-
                     <div>
                       <label for="pgkPercent" class="block text-sm font-medium text-gray-700 mb-2">PGK (%)</label>
-                      <input type="number" id="pgkPercent" value="30" min="0" max="100" oninput="updateTotalTypePercent()"
-                             class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
+                      <input type="number" id="pgkPercent" min="0" max="100" value="30" oninput="updateTotalTypePercent()"
+                             class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-orange-500">
                     </div>
                   </div>
-                  <div class="mt-4 text-center">
-                    <p class="text-sm text-gray-600">Total: <span id="totalTypePercentDisplay" class="text-2xl font-bold text-green-600">100%</span></p>
+                  <div class="text-center">
+                    <p class="text-sm text-gray-600 mb-1">Total Bobot Tipe Soal:</p>
+                    <p id="totalTypePercentDisplay" class="text-2xl font-bold text-green-600">100%</p>
+                    <p class="text-xs text-gray-500 mt-2">Harus 100% agar token bisa dibuat</p>
                   </div>
                 </div>
 
+                <div class="bg-yellow-50 rounded-lg p-4">
+                  <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" id="isOpenBook" class="w-5 h-5">
+                    <div>
+                      <span class="font-semibold text-gray-900">📖 Open Book</span>
+                      <p class="text-xs text-gray-600">Centang jika siswa diperbolehkan membuka tab lain saat ujian</p>
+                    </div>
+                  </label>
+                </div>
+
                 <button type="submit" class="w-full px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold hover:bg-orange-700 transition">
-                  🎫 Generate Token
+                  🎫 Generate Token Ujian
                 </button>
               </form>
             </div>
 
             <div class="bg-white rounded-xl shadow-xl p-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Daftar Token Ujian (${exams.length})</h3>
-              
+              <h3 class="text-xl font-bold text-gray-900 mb-4">🎫 Daftar Token Ujian (${exams.length})</h3>
               ${exams.length === 0 ? `
                 <div class="text-center py-12">
-                  <p class="text-gray-500 text-lg">Belum ada token ujian</p>
+                  <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"></path>
+                  </svg>
+                  <p class="text-gray-500">Belum ada token ujian</p>
                 </div>
               ` : `
                 <div class="overflow-x-auto">
                   <table class="w-full">
-                    <thead class="bg-gray-50">
+                    <thead class="bg-orange-50">
                       <tr>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Token</th>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Judul</th>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Mapel</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Soal</th>
                         <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Durasi</th>
-                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Total Soal</th>
-                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">PG / PGK</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Tipe</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Mode</th>
                         <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Aksi</th>
                       </tr>
                     </thead>
@@ -3442,18 +4102,28 @@
                       ${exams.map(exam => `
                         <tr class="hover:bg-gray-50">
                           <td class="px-6 py-4">
-                            <span class="px-3 py-1 bg-orange-100 text-orange-800 rounded font-bold text-lg">${exam.token}</span>
+                            <span class="font-mono font-bold text-orange-600 text-lg">${exam.token}</span>
                           </td>
-                          <td class="px-6 py-4 font-semibold text-gray-900">${exam.title}</td>
+                          <td class="px-6 py-4 text-gray-900 font-medium">${exam.title}</td>
                           <td class="px-6 py-4">
-                            <span class="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-bold">${exam.subject}</span>
+                            <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-semibold">${exam.subject}</span>
                           </td>
-                          <td class="px-6 py-4 text-center text-gray-900">${exam.duration} menit</td>
-                          <td class="px-6 py-4 text-center font-semibold text-gray-900">${exam.total_questions}</td>
-                          <td class="px-6 py-4 text-center text-sm text-gray-600">${exam.pg_count || 0} / ${exam.pgk_count || 0}</td>
+                          <td class="px-6 py-4 text-center font-bold text-gray-900">${exam.total_questions}</td>
+                          <td class="px-6 py-4 text-center text-gray-600">${exam.duration} menit</td>
+                          <td class="px-6 py-4 text-center text-xs">
+                            <div>PG: ${exam.pg_percent}%</div>
+                            <div>PGK: ${exam.pgk_percent}%</div>
+                          </td>
                           <td class="px-6 py-4 text-center">
-                            <button onclick="handleDeleteExam('${exam.id}')" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm">
-                              Hapus
+                            <span class="px-2 py-1 rounded text-xs font-semibold ${
+                              exam.is_open_book ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-800'
+                            }">
+                              ${exam.is_open_book ? '📖 Open' : '🔒 Closed'}
+                            </span>
+                          </td>
+                          <td class="px-6 py-4 text-center">
+                            <button onclick="handleDeleteExam('${exam.id}')" class="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 transition text-sm">
+                              🗑️
                             </button>
                           </td>
                         </tr>
@@ -3466,91 +4136,15 @@
           </div>
         </div>
       `;
-    }
-
-    let monitoringInterval = null;
-
-    async function resetStudentSession(sessionId, studentName) {
-      const modal = document.createElement('div');
-      modal.className = 'fixed inset-0 bg-black bg-opacity-50 modal-backdrop flex items-center justify-center z-50 fade-in';
-      modal.innerHTML = `
-        <div class="bg-white rounded-lg p-8 max-w-md mx-4 shadow-2xl">
-          <h3 class="text-xl font-bold text-gray-900 mb-4">🔄 Reset Session Siswa</h3>
-          <p class="text-gray-600 mb-4">Apakah Anda yakin ingin mereset session untuk <strong>${studentName}</strong>?</p>
-          <p class="text-sm text-orange-600 mb-6">⚠️ Siswa akan bisa mengerjakan ujian dari awal dengan soal yang sama.</p>
-          <div class="flex gap-3">
-            <button id="cancelReset" class="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition">
-              Batal
-            </button>
-            <button id="confirmReset" class="flex-1 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition">
-              Reset
-            </button>
-          </div>
-        </div>
-      `;
       
-      document.body.appendChild(modal);
-      
-      document.getElementById('cancelReset').onclick = () => {
-        document.body.removeChild(modal);
-      };
-      
-      document.getElementById('confirmReset').onclick = async () => {
-        document.body.removeChild(modal);
-        showLoading();
-        
-        try {
-          // Ambil data session untuk mendapatkan remaining_seconds dari exam
-          const { data: session, error: sessionError } = await supabase
-            .from('student_sessions')
-            .select('*, exams!inner(duration)')
-            .eq('id', sessionId)
-            .single();
-          
-          if (sessionError) throw sessionError;
-          
-          // Reset session ke kondisi awal
-          const { error: updateError } = await supabase
-            .from('student_sessions')
-            .update({
-              status: 'active',
-              answered_count: 0,
-              remaining_seconds: session.exams.duration * 60,
-              score: null,
-              correct_count: null,
-              total_points: null,
-              earned_points: null,
-              finished_at: null
-            })
-            .eq('id', sessionId);
-          
-          if (updateError) throw updateError;
-          
-          // Hapus semua jawaban siswa untuk session ini
-          const { error: deleteError } = await supabase
-            .from('student_answers')
-            .delete()
-            .eq('session_id', sessionId);
-          
-          if (deleteError) throw deleteError;
-          
-          clearSessionsCache();
-          hideLoading();
-          showToast(`Session ${studentName} berhasil direset!`, 'success');
-          await renderMonitoring();
-        } catch (error) {
-          hideLoading();
-          console.error('Error resetting session:', error);
-          showToast('Gagal mereset session: ' + error.message, 'error');
-        }
-      };
+      updateTotalTypePercent();
     }
 
     async function renderMonitoring() {
       appState.currentView = 'monitoring';
       saveAdminStateToLocalStorage();
       
-      // Auto-finish expired sessions sebelum render
+      // Auto-finish expired sessions first
       await autoFinishExpiredSessions();
       
       showLoading();
@@ -3559,114 +4153,103 @@
 
       const app = document.getElementById('app');
       
+      const activeSessions = sessions.filter(s => s.status === 'active');
+      const finishedSessions = sessions.filter(s => s.status === 'finished');
+      
       app.innerHTML = `
-        <div class="min-h-full" style="background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);">
+        <div class="min-h-full" style="background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);">
           <nav class="bg-white shadow-lg">
             <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-gray-900">📊 Monitoring Ujian</h1>
-              <div class="flex gap-3">
+              <h1 class="text-2xl font-bold text-gray-900">Monitoring Ujian Real-time</h1>
+              <div class="flex gap-2">
                 <button onclick="refreshMonitoring()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
                   🔄 Refresh
                 </button>
-                <button onclick="downloadExcelReport()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
-                  📥 Export Excel
-                </button>
-                <button onclick="showStatistics()" class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
-                  📈 Statistik
-                </button>
                 <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                  Kembali
+                  ← Kembali
                 </button>
               </div>
             </div>
           </nav>
 
           <div class="max-w-7xl mx-auto p-8">
-            <div class="bg-white rounded-xl shadow-xl p-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Daftar Peserta Ujian (${sessions.length})</h3>
-              
-              ${sessions.length === 0 ? `
-                <div class="text-center py-12">
-                  <p class="text-gray-500 text-lg">Belum ada peserta ujian</p>
+            <div class="grid md:grid-cols-4 gap-6 mb-6">
+              <div class="bg-white rounded-xl p-6 shadow-xl">
+                <p class="text-sm text-gray-600 mb-1">Total Peserta</p>
+                <p class="text-4xl font-bold text-blue-600">${sessions.length}</p>
+              </div>
+              <div class="bg-white rounded-xl p-6 shadow-xl">
+                <p class="text-sm text-gray-600 mb-1">Sedang Mengerjakan</p>
+                <p class="text-4xl font-bold text-orange-600">${activeSessions.length}</p>
+              </div>
+              <div class="bg-white rounded-xl p-6 shadow-xl">
+                <p class="text-sm text-gray-600 mb-1">Selesai</p>
+                <p class="text-4xl font-bold text-green-600">${finishedSessions.length}</p>
+              </div>
+              <div class="bg-white rounded-xl p-6 shadow-xl">
+                <div class="flex gap-2">
+                  <button onclick="downloadExcelReport()" class="flex-1 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-semibold">
+                    📊 Excel
+                  </button>
+                  <button onclick="showStatistics()" class="flex-1 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm font-semibold">
+                    📈 Stats
+                  </button>
                 </div>
-              ` : `
+              </div>
+            </div>
+
+            <!-- Active Sessions -->
+            ${activeSessions.length > 0 ? `
+              <div class="bg-white rounded-xl shadow-xl p-8 mb-6">
+                <h3 class="text-xl font-bold text-gray-900 mb-4">🔥 Sedang Mengerjakan (${activeSessions.length})</h3>
                 <div class="overflow-x-auto">
                   <table class="w-full">
-                    <thead class="bg-gray-50">
+                    <thead class="bg-orange-50">
                       <tr>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Nama</th>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Kelas</th>
-                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Status</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Ujian</th>
                         <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Progress</th>
-                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Nilai</th>
                         <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Sisa Waktu</th>
-                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Aksi</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Pelanggaran</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200">
-                      ${sessions.map(record => {
+                      ${activeSessions.map(record => {
                         const progress = Math.round((record.answered_count / record.total_questions) * 100);
                         const hours = Math.floor(record.remaining_seconds / 3600);
                         const minutes = Math.floor((record.remaining_seconds % 3600) / 60);
                         const seconds = record.remaining_seconds % 60;
                         const remainingTime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-                        
-                        let statusBadge = '';
-                        let statusText = '';
-                        let scoreDisplay = '-';
-                        let scoreClass = 'text-gray-400';
-                        
-                        if (record.status === 'finished') {
-                          statusBadge = 'bg-gray-100 text-gray-800';
-                          statusText = 'Selesai';
-                          
-                          const score = record.score || 0;
-                          scoreDisplay = score;
-                          
-                          if (score >= 90) {
-                            scoreClass = 'text-green-600 font-bold';
-                          } else if (score >= 80) {
-                            scoreClass = 'text-blue-600 font-bold';
-                          } else if (score >= 70) {
-                            scoreClass = 'text-yellow-600 font-bold';
-                          } else if (score >= 60) {
-                            scoreClass = 'text-orange-600 font-bold';
-                          } else {
-                            scoreClass = 'text-red-600 font-bold';
-                          }
-                        } else {
-                          statusBadge = 'bg-green-100 text-green-800';
-                          statusText = `Mengerjakan ${record.exam_title}`;
-                        }
+                        const isLowTime = record.remaining_seconds < 300;
+                        const violations = record.violation_count || 0;
                         
                         return `
                           <tr class="hover:bg-gray-50">
-                            <td class="px-6 py-4 font-semibold text-gray-900">${record.student_name}</td>
-                            <td class="px-6 py-4 text-gray-900">${record.student_class}</td>
+                            <td class="px-6 py-4 font-medium text-gray-900">${record.student_name}</td>
+                            <td class="px-6 py-4 text-gray-600">${record.student_class}</td>
+                            <td class="px-6 py-4 text-gray-900">${record.exam_title}</td>
                             <td class="px-6 py-4">
-                              <span class="px-3 py-1 ${statusBadge} rounded-full text-xs font-semibold">
-                                ${statusText}
-                              </span>
-                            </td>
-                            <td class="px-6 py-4">
-                              <div class="flex items-center gap-3">
-                                <div class="flex-1 bg-gray-200 rounded-full h-3">
-                                  <div class="bg-blue-600 h-3 rounded-full progress-bar" style="width: ${progress}%"></div>
+                              <div class="flex items-center gap-2">
+                                <div class="flex-1 bg-gray-200 rounded-full h-2">
+                                  <div class="bg-orange-500 h-2 rounded-full" style="width: ${progress}%"></div>
                                 </div>
-                                <span class="text-sm font-semibold text-gray-700">${record.answered_count}/${record.total_questions}</span>
+                                <span class="text-sm font-semibold text-gray-700">${progress}%</span>
                               </div>
+                              <p class="text-xs text-gray-500 mt-1">${record.answered_count}/${record.total_questions} soal</p>
                             </td>
                             <td class="px-6 py-4 text-center">
-                              <span class="text-2xl ${scoreClass}">${scoreDisplay}</span>
+                              <span class="font-mono font-bold ${isLowTime ? 'text-red-600' : 'text-gray-900'}">${remainingTime}</span>
                             </td>
                             <td class="px-6 py-4 text-center">
-                              <span class="font-mono text-sm ${record.remaining_seconds <= 300 ? 'text-red-600 font-bold' : 'text-gray-900'}">${remainingTime}</span>
-                            </td>
-                            <td class="px-6 py-4 text-center">
-                              <button onclick="resetStudentSession('${record.id}', '${record.student_name}')" 
-                                      class="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition text-sm">
-                                🔄 Reset
-                              </button>
+                              <span class="px-2 py-1 rounded text-xs font-semibold ${
+                                violations >= 3 ? 'bg-red-100 text-red-800' :
+                                violations >= 2 ? 'bg-orange-100 text-orange-800' :
+                                violations >= 1 ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-green-100 text-green-800'
+                              }">
+                                ${violations}/3
+                              </span>
                             </td>
                           </tr>
                         `;
@@ -3674,103 +4257,52 @@
                     </tbody>
                   </table>
                 </div>
-              `}
-            </div>
-          </div>
-        </div>
-      `;
+              </div>
+            ` : ''}
 
-      if (monitoringInterval) {
-        clearInterval(monitoringInterval);
-      }
-      
-      monitoringInterval = setInterval(async () => {
-        if (appState.currentView === 'monitoring') {
-          await renderMonitoring();
-        }
-      }, 10000);
-    }
-
-    async function renderSubjectManagement() {
-      appState.currentView = 'subject-management';
-      saveAdminStateToLocalStorage();
-      
-      showLoading();
-      const subjects = await getSubjects(true);
-      hideLoading();
-
-      const app = document.getElementById('app');
-      
-      app.innerHTML = `
-        <div class="min-h-full" style="background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);">
-          <nav class="bg-white shadow-lg">
-            <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-              <h1 class="text-2xl font-bold text-gray-900">📚 Manajemen Mata Pelajaran</h1>
-              <button onclick="renderAdminMenu()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-                Kembali
-              </button>
-            </div>
-          </nav>
-
-          <div class="max-w-7xl mx-auto p-8">
-            <div class="bg-white rounded-xl shadow-xl p-8 mb-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Tambah Mata Pelajaran</h3>
-              
-              <form id="subjectForm" onsubmit="handleAddSubject(event)" class="space-y-4">
-                <div class="grid md:grid-cols-2 gap-4">
-                  <div>
-                    <label for="subjectCode" class="block text-sm font-medium text-gray-700 mb-2">Kode Mata Pelajaran *</label>
-                    <input type="text" id="subjectCode" required placeholder="Contoh: MTK"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500 uppercase">
-                  </div>
-
-                  <div>
-                    <label for="subjectName" class="block text-sm font-medium text-gray-700 mb-2">Nama Mata Pelajaran *</label>
-                    <input type="text" id="subjectName" required placeholder="Contoh: Matematika"
-                           class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500">
-                  </div>
-                </div>
-
-                <div>
-                  <label for="subjectDescription" class="block text-sm font-medium text-gray-700 mb-2">Deskripsi</label>
-                  <textarea id="subjectDescription" rows="3" placeholder="Opsional"
-                            class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-purple-500"></textarea>
-                </div>
-
-                <button type="submit" class="w-full px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 transition">
-                  ➕ Tambah Mata Pelajaran
-                </button>
-              </form>
-            </div>
-
+            <!-- Finished Sessions -->
             <div class="bg-white rounded-xl shadow-xl p-8">
-              <h3 class="text-2xl font-bold text-gray-900 mb-6">Daftar Mata Pelajaran (${subjects.length})</h3>
-              
-              ${subjects.length === 0 ? `
+              <h3 class="text-xl font-bold text-gray-900 mb-4">✅ Selesai (${finishedSessions.length})</h3>
+              ${finishedSessions.length === 0 ? `
                 <div class="text-center py-12">
-                  <p class="text-gray-500 text-lg">Belum ada mata pelajaran</p>
+                  <svg class="w-16 h-16 mx-auto text-gray-400 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                  <p class="text-gray-500">Belum ada ujian yang selesai</p>
                 </div>
               ` : `
                 <div class="overflow-x-auto">
                   <table class="w-full">
-                    <thead class="bg-gray-50">
+                    <thead class="bg-green-50">
                       <tr>
-                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Kode</th>
                         <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Nama</th>
-                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Deskripsi</th>
-                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Aksi</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Kelas</th>
+                        <th class="px-6 py-3 text-left text-sm font-semibold text-gray-900">Ujian</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Nilai</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Benar/Salah</th>
+                        <th class="px-6 py-3 text-center text-sm font-semibold text-gray-900">Waktu Selesai</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200">
-                      ${subjects.map(subject => `
+                      ${finishedSessions.map(record => `
                         <tr class="hover:bg-gray-50">
-                          <td class="px-6 py-4 font-semibold text-purple-600">${subject.code}</td>
-                          <td class="px-6 py-4 text-gray-900">${subject.name}</td>
-                          <td class="px-6 py-4 text-gray-600">${subject.description || '-'}</td>
+                          <td class="px-6 py-4 font-medium text-gray-900">${record.student_name}</td>
+                          <td class="px-6 py-4 text-gray-600">${record.student_class}</td>
+                          <td class="px-6 py-4 text-gray-900">${record.exam_title}</td>
                           <td class="px-6 py-4 text-center">
-                            <button onclick="handleDeleteSubject('${subject.id}')" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm">
-                              Hapus
-                            </button>
+                            <span class="text-2xl font-bold ${
+                              record.score >= 75 ? 'text-green-600' :
+                              record.score >= 60 ? 'text-yellow-600' : 'text-red-600'
+                            }">
+                              ${record.score || '-'}
+                            </span>
+                          </td>
+                          <td class="px-6 py-4 text-center">
+                            <span class="text-green-600 font-semibold">${record.correct_count || 0}</span> / 
+                            <span class="text-red-600 font-semibold">${record.answered_count - (record.correct_count || 0)}</span>
+                          </td>
+                          <td class="px-6 py-4 text-center text-sm text-gray-600">
+                            ${new Date(record.finished_at).toLocaleString('id-ID')}
                           </td>
                         </tr>
                       `).join('')}
@@ -3782,7 +4314,66 @@
           </div>
         </div>
       `;
+
+      // Auto-refresh every 10 seconds
+      if (monitoringInterval) {
+        clearInterval(monitoringInterval);
+      }
+      monitoringInterval = setInterval(async () => {
+        if (appState.currentView === 'monitoring') {
+          await renderMonitoring();
+        }
+      }, 10000);
     }
-  </script> Saya akan memberikan kode lengkap yang sudah diperbaiki. Karena keterbatasan panjang response, saya akan fokus pada bagian yang penting: **Perbaikan yang sudah saya implementasikan:** 1. ✅ **Data tidak hilang saat refresh** - Menggunakan localStorage untuk menyimpan state ujian 2. ✅ **PG Kompleks menggunakan checkboxes** - Fungsi `togglePGKAnswer()` ditambahkan 3. ✅ **NISN diubah menjadi Kelas** di monitoring 4. ✅ **Status menampilkan mata pelajaran** yang sedang dikerjakan Kode lengkap sudah terlalu panjang untuk ditampilkan di satu response. Apakah Anda ingin saya: 1. Upload kode lengkap ke file terpisah, atau 2. Fokus pada bagian-bagian spesifik yang perlu diperbaiki saja? Silakan refresh halaman setelah copy-paste kode di atas, dan semua 4 perbaikan sudah berfungsi! 🎉
- <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9aeb1fccd7b4ea82',t:'MTc2NTg1NjA1OC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+
+    // Make functions globally accessible
+    window.closeViolationWarning = closeViolationWarning;
+    window.handleStudentLogin = handleStudentLogin;
+    window.studentLogout = studentLogout;
+    window.resumeExam = resumeExam;
+    window.startNewExam = startNewExam;
+    window.backToDashboard = backToDashboard;
+    window.selectAnswer = selectAnswer;
+    window.togglePGKAnswer = togglePGKAnswer;
+    window.markAsDoubtful = markAsDoubtful;
+    window.goToQuestion = goToQuestion;
+    window.previousQuestion = previousQuestion;
+    window.nextQuestion = nextQuestion;
+    window.showFinishConfirmation = showFinishConfirmation;
+    window.finishExam = finishExam;
+    window.showAdminLogin = showAdminLogin;
+    window.showStudentLogin = showStudentLogin;
+    window.loginAdmin = loginAdmin;
+    window.backToRoleSelection = backToRoleSelection;
+    window.renderAdminMenu = renderAdminMenu;
+    window.renderSubjectManagement = renderSubjectManagement;
+    window.renderUserManagement = renderUserManagement;
+    window.renderBankSoal = renderBankSoal;
+    window.renderExamManagement = renderExamManagement;
+    window.renderMonitoring = renderMonitoring;
+    window.handleAddSubject = handleAddSubject;
+    window.handleDeleteSubject = handleDeleteSubject;
+    window.handleAddUser = handleAddUser;
+    window.handleDeleteUser = handleDeleteUser;
+    window.toggleClassField = toggleClassField;
+    window.downloadUserTemplate = downloadUserTemplate;
+    window.handleExcelUpload = handleExcelUpload;
+    window.handleAddQuestion = handleAddQuestion;
+    window.handleDeleteQuestion = handleDeleteQuestion;
+    window.toggleAnswerType = toggleAnswerType;
+    window.filterBySubject = filterBySubject;
+    window.toggleBulkEditMode = toggleBulkEditMode;
+    window.toggleQuestionSelection = toggleQuestionSelection;
+    window.selectAllQuestions = selectAllQuestions;
+    window.showBulkEditModal = showBulkEditModal;
+    window.downloadWordTemplate = downloadWordTemplate;
+    window.showImportExcelModal = showImportExcelModal;
+    window.handleGenerateExam = handleGenerateExam;
+    window.updateTotalTypePercent = updateTotalTypePercent;
+    window.handleDeleteExam = handleDeleteExam;
+    window.downloadExcelReport = downloadExcelReport;
+    window.showStatistics = showStatistics;
+    window.refreshMonitoring = refreshMonitoring;
+  </script>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9aec20ac12e3e785',t:'MTc2NTg2NjU4MC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
