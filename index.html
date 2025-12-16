@@ -191,19 +191,19 @@
     try {
       supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
       isSupabaseConfigured = true;
-      console.log('✅ Supabase connected successfully!');
+      console.log('✅ Database connected successfully!');
       
       // Test connection
       supabase.from('subjects').select('count').then(result => {
         if (result.error) {
-          console.error('❌ Supabase connection test failed:', result.error);
+          console.error('❌ Database connection test failed:', result.error);
           isSupabaseConfigured = false;
         } else {
-          console.log('✅ Supabase connection test passed');
+          console.log('✅ Database connection test passed');
         }
       });
     } catch (error) {
-      console.error('❌ Error initializing Supabase:', error);
+      console.error('❌ Error initializing Database:', error);
       isSupabaseConfigured = false;
     }
 
@@ -568,7 +568,7 @@
 
     async function addQuestion(questionData) {
       if (!isSupabaseConfigured) {
-        showToast('Supabase belum dikonfigurasi!', 'error');
+        showToast('Database belum dikonfigurasi!', 'error');
         return null;
       }
       
@@ -668,7 +668,7 @@
 
     async function addExam(examData) {
       if (!isSupabaseConfigured) {
-        showToast('Supabase belum dikonfigurasi!', 'error');
+        showToast('Database belum dikonfigurasi!', 'error');
         return null;
       }
       
@@ -2556,7 +2556,7 @@
             <div class="text-center mb-12">
               <h1 class="text-5xl font-bold text-gray-900 mb-2">CBT Professional System</h1>
               <p class="text-xl text-gray-600">Sistem Computer Based Test Profesional</p>
-              ${isSupabaseConfigured ? '<p class="text-sm text-green-600 mt-2">✅ Terhubung ke Supabase</p>' : '<p class="text-sm text-red-600 mt-2">❌ Koneksi Supabase Gagal</p>'}
+              ${isSupabaseConfigured ? '<p class="text-sm text-green-600 mt-2">✅ Terhubung ke Database</p>' : '<p class="text-sm text-red-600 mt-2">❌ Koneksi Database Gagal</p>'}
             </div>
 
             <div class="grid md:grid-cols-2 gap-6">
